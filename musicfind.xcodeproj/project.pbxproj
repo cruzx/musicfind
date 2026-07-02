@@ -376,7 +376,7 @@
 				DEVELOPMENT_TEAM = SZU26G5RUX;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_CFBundleDisplayName = "MF RED";
+				INFOPLIST_KEY_CFBundleDisplayName = FlipMusic;
 				INFOPLIST_KEY_CFBundleURLTypes = "{\n    CFBundleURLName = \"Spotify Callback\";\n    CFBundleURLSchemes =     (\n        musicfind\n    );\n}";
 				INFOPLIST_KEY_NSAppleMusicUsageDescription = "用于连接 Apple Music 并读取你的音乐授权状态。";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -411,7 +411,7 @@
 				DEVELOPMENT_TEAM = SZU26G5RUX;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_CFBundleDisplayName = "MF RED";
+				INFOPLIST_KEY_CFBundleDisplayName = FlipMusic;
 				INFOPLIST_KEY_CFBundleURLTypes = "{\n    CFBundleURLName = \"Spotify Callback\";\n    CFBundleURLSchemes =     (\n        musicfind\n    );\n}";
 				INFOPLIST_KEY_NSAppleMusicUsageDescription = "用于连接 Apple Music 并读取你的音乐授权状态。";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
