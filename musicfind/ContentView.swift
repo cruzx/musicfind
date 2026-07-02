@@ -35,11 +35,6 @@ struct ContentView: View {
     @State private var isHomeAppendingMore = false
     @State private var homeLoadMorePage = 0
     @State private var temporarilySkippedHomeSongIDs: [Int] = []
-    @State private var homeDraggedSong: DemoSong?
-    @State private var homeDragStartLocation: CGPoint = .zero
-    @State private var homeDragLocation: CGPoint = .zero
-    @State private var isHomeDragOverPlayerBar = false
-    @State private var isHomeDragReturning = false
     @StateObject private var shakeObserver = ShakeMotionObserver()
     @State private var homeIdleTask: Task<Void, Never>?
     @State private var homeFlipTask: Task<Void, Never>?
@@ -80,15 +75,8 @@ struct ContentView: View {
                                             registerHomeInteraction()
                                             nowPlaying = slot.song
                                             Task { await musicConnector.play(slot.song, in: visibleHomeSongs) }
-                                        },
-                                        onDragChanged: { song, startLocation, currentLocation in
-                                            updateHomeSongDrag(song: song, startLocation: startLocation, currentLocation: currentLocation)
-                                        },
-                                        onDragEnded: { song, startLocation, currentLocation in
-                                            finishHomeSongDrag(song: song, startLocation: startLocation, currentLocation: currentLocation)
                                         }
                                     )
-                                    .opacity(homeDraggedSong?.id == slot.song.id ? 0.28 : 1)
                                     .onAppear {
                                         loadMoreHomeSongsIfNeeded(slot)
                                     }
@@ -137,7 +125,7 @@ struct ContentView: View {
                         activeTab = .settings
                     }
                 }
-                .padding(.leading, 34)
+                .padding(.leading, 20)
                 .padding(.trailing, 14)
                 .padding(.top, 12)
                 .offset(y: 40)
@@ -154,7 +142,7 @@ struct ContentView: View {
                     isPlaying: musicConnector.isPlaying,
                     namespace: playerExpansionNamespace,
                     isPlayerCardVisible: isPlayerPillHiddenForExpansion,
-                    isDropTargeted: isHomeDragOverPlayerBar,
+                    isDropTargeted: false,
                     playerPillFrame: $playerPillFrame,
                     onPlayerTap: showPlayerCard,
                     onTogglePlayback: {
@@ -185,18 +173,6 @@ struct ContentView: View {
                 .padding(.horizontal, 12)
                 .transition(.scale(scale: 0.94).combined(with: .opacity))
                 .zIndex(12)
-            }
-
-            if let homeDraggedSong {
-                HomeDraggedSongPreview(song: homeDraggedSong, isOverPlayerBar: isHomeDragOverPlayerBar)
-                    .frame(width: isHomeDragOverPlayerBar ? 184 : 218, height: isHomeDragOverPlayerBar ? 238 : 284)
-                    .position(homeDragLocation)
-                    .scaleEffect(isHomeDragReturning ? 0.72 : 1)
-                    .opacity(isHomeDragReturning ? 0.82 : 1)
-                    .allowsHitTesting(false)
-                    .animation(.smooth(duration: 0.18, extraBounce: 0.0), value: isHomeDragOverPlayerBar)
-                    .animation(.smooth(duration: 0.20, extraBounce: 0.0), value: isHomeDragReturning)
-                    .zIndex(24)
             }
 
             if isPlayerCardVisible {
@@ -371,74 +347,6 @@ struct ContentView: View {
                 isPlayerPillHiddenForExpansion = false
             }
         }
-    }
-
-    private func updateHomeSongDrag(song: DemoSong, startLocation: CGPoint, currentLocation: CGPoint) {
-        guard isHomeSurfaceVisible else { return }
-        if homeDraggedSong?.id != song.id {
-            stopHomeDrift()
-            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-            homeDraggedSong = song
-            homeDragStartLocation = startLocation
-            homeDragLocation = startLocation
-            isHomeDragReturning = false
-            isHomeDragOverPlayerBar = false
-        }
-
-        var transaction = Transaction()
-        transaction.disablesAnimations = true
-        withTransaction(transaction) {
-            homeDragLocation = currentLocation
-        }
-
-        let dropFrame = playerPillFrame.insetBy(dx: -44, dy: -58)
-        let nextIsOver = dropFrame.contains(currentLocation)
-        if nextIsOver != isHomeDragOverPlayerBar {
-            UIImpactFeedbackGenerator(style: nextIsOver ? .medium : .light).impactOccurred()
-            withAnimation(.smooth(duration: 0.16, extraBounce: 0.0)) {
-                isHomeDragOverPlayerBar = nextIsOver
-            }
-        }
-    }
-
-    private func finishHomeSongDrag(song: DemoSong, startLocation: CGPoint, currentLocation: CGPoint) {
-        guard homeDraggedSong?.id == song.id else { return }
-        let dropFrame = playerPillFrame.insetBy(dx: -44, dy: -58)
-        let shouldPlay = dropFrame.contains(currentLocation)
-
-        if shouldPlay {
-            UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
-            nowPlaying = song
-            withAnimation(.smooth(duration: 0.14, extraBounce: 0.0)) {
-                homeDragLocation = CGPoint(x: playerPillFrame.midX, y: playerPillFrame.midY)
-                isHomeDragOverPlayerBar = false
-                isHomeDragReturning = true
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                clearHomeSongDrag()
-                Task { await musicConnector.play(song, in: visibleHomeSongs) }
-            }
-        } else {
-            withAnimation(.smooth(duration: 0.22, extraBounce: 0.0)) {
-                homeDragLocation = startLocation
-                isHomeDragOverPlayerBar = false
-                isHomeDragReturning = true
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.23) {
-                clearHomeSongDrag()
-                if isHomeSurfaceVisible {
-                    scheduleHomeIdleDrift()
-                }
-            }
-        }
-    }
-
-    private func clearHomeSongDrag() {
-        homeDraggedSong = nil
-        homeDragStartLocation = .zero
-        homeDragLocation = .zero
-        isHomeDragOverPlayerBar = false
-        isHomeDragReturning = false
     }
 
     private func songsForColumn(_ column: Int) -> [DemoSong] {
@@ -1121,13 +1029,14 @@ private final class MusicConnectionManager: ObservableObject {
     private let spotifyAuthenticator = SpotifyPKCEAuthenticator()
     private var playbackLoadingTask: Task<Void, Never>?
     private var queuedPlaybackTask: Task<Void, Never>?
+    private var playbackQueueWarmupTask: Task<Void, Never>?
     private var recommendationTask: Task<Void, Never>?
     private var playbackObservers: [NSObjectProtocol] = []
-    private let playbackQueueLimit = 12
+    private let playbackQueueLimit = 6
 
     var discoverySongs: [DemoSong] {
-        guard librarySongs.isEmpty == false else { return [] }
-        return interleavedDiscoverySongs(librarySongs: librarySongs, recommendedSongs: recommendedSongs) + discoveryExtraSongs
+        let baseSongs = librarySongs.isEmpty ? DemoSong.library : librarySongs
+        return interleavedDiscoverySongs(librarySongs: baseSongs, recommendedSongs: recommendedSongs) + discoveryExtraSongs
     }
 
     var appleMusicStatusText: String {
@@ -1169,9 +1078,12 @@ private final class MusicConnectionManager: ObservableObject {
     }
 
     func refreshAppleMusicLibraryIfPossible() async {
-        guard appleMusicConnected || MPMediaLibrary.authorizationStatus() == .authorized else { return }
-        appleMusicConnected = true
-        loadAppleMusicLibrary()
+        if appleMusicConnected || MPMediaLibrary.authorizationStatus() == .authorized {
+            appleMusicConnected = true
+            loadAppleMusicLibrary()
+        } else {
+            refreshRecommendations()
+        }
         syncPlaybackState()
     }
 
@@ -1263,8 +1175,9 @@ private final class MusicConnectionManager: ObservableObject {
         currentSong = song
         isPlaying = true
         let player = MPMusicPlayerController.applicationMusicPlayer
-        setContinuousQueue(on: player, startingWith: song, in: queueSongs)
+        setImmediateQueue(on: player, for: song)
         player.play()
+        scheduleContinuousQueueWarmup(startingWith: song, in: queueSongs)
         endPlaybackLoading()
         message = "正在播放：\(song.title)"
     }
@@ -1289,8 +1202,9 @@ private final class MusicConnectionManager: ObservableObject {
             try? await Task.sleep(for: .milliseconds(20))
             guard !Task.isCancelled else { return }
             let player = MPMusicPlayerController.applicationMusicPlayer
-            setContinuousQueue(on: player, startingWith: song, in: queueSongs)
+            setImmediateQueue(on: player, for: song)
             player.play()
+            scheduleContinuousQueueWarmup(startingWith: song, in: queueSongs)
             endPlaybackLoading()
             message = "正在播放：\(song.title)"
         }
@@ -1317,8 +1231,9 @@ private final class MusicConnectionManager: ObservableObject {
             endPlaybackLoading()
             message = "正在播放：\(song.title)"
         } else {
-            setContinuousQueue(on: player, startingWith: song, in: queueSongs)
+            setImmediateQueue(on: player, for: song)
             player.play()
+            scheduleContinuousQueueWarmup(startingWith: song, in: queueSongs)
             playingSongID = song.id
             currentSong = song
             isPlaying = true
@@ -1413,12 +1328,34 @@ private final class MusicConnectionManager: ObservableObject {
         )
     }
 
-    private func setContinuousQueue(
+    private func setImmediateQueue(on player: MPMusicPlayerController, for song: DemoSong) {
+        if let mediaItem = song.mediaItem {
+            player.setQueue(with: MPMediaItemCollection(items: [mediaItem]))
+            player.nowPlayingItem = mediaItem
+        } else if let storeID = song.storeID {
+            player.setQueue(with: [storeID])
+        }
+    }
+
+    private func scheduleContinuousQueueWarmup(startingWith song: DemoSong, in queueSongs: [DemoSong]?) {
+        playbackQueueWarmupTask?.cancel()
+        guard song.mediaItem != nil else { return }
+
+        playbackQueueWarmupTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(360))
+            guard !Task.isCancelled, playingSongID == song.id else { return }
+            let player = MPMusicPlayerController.applicationMusicPlayer
+            prepareContinuousQueue(on: player, startingWith: song, in: queueSongs)
+        }
+    }
+
+    private func prepareContinuousQueue(
         on player: MPMusicPlayerController,
         startingWith song: DemoSong,
         in queueSongs: [DemoSong]?
     ) {
         let rotatedSongs = playbackQueueSongs(startingWith: song, in: queueSongs)
+        guard rotatedSongs.count > 1 else { return }
         let items = rotatedSongs.compactMap(\.mediaItem)
         if let mediaItem = song.mediaItem {
             player.setQueue(with: MPMediaItemCollection(items: items.isEmpty ? [mediaItem] : items))
@@ -1477,9 +1414,8 @@ private final class MusicConnectionManager: ObservableObject {
         recommendationTask?.cancel()
         recommendedSongs = []
         discoveryExtraSongs = []
-        guard librarySongs.isEmpty == false else { return }
 
-        let seedSongs = Array(librarySongs.prefix(24))
+        let seedSongs = Array((librarySongs.isEmpty ? DemoSong.library : librarySongs).prefix(24))
         recommendationTask = Task { @MainActor in
             let recommendations = await fetchAppleCatalogRecommendations(from: seedSongs)
             guard !Task.isCancelled else { return }
@@ -1488,12 +1424,28 @@ private final class MusicConnectionManager: ObservableObject {
     }
 
     private func fetchAppleCatalogRecommendations(from seedSongs: [DemoSong]) async -> [DemoSong] {
-        await fetchAppleCatalogSongs(
+        let chartSongs = await fetchAppleChartSongs(seedSongs: seedSongs, maxCount: 18)
+        let searchSongs = await fetchAppleCatalogSongs(
             queries: recommendationQueries(from: seedSongs),
-            seedSongs: seedSongs,
-            maxCount: 36,
-            idBase: 200_000
+            seedSongs: seedSongs + chartSongs,
+            maxCount: 42,
+            idBase: 220_000
         )
+        return Array((chartSongs + searchSongs).prefix(54))
+    }
+
+    private func fetchAppleChartSongs(seedSongs: [DemoSong], maxCount: Int) async -> [DemoSong] {
+        do {
+            let tracks = try await AppleMusicRSSClient.topSongs(limit: 50)
+            return await songs(
+                from: tracks,
+                seedSongs: seedSongs,
+                maxCount: maxCount,
+                idBase: 180_000
+            )
+        } catch {
+            return []
+        }
     }
 
     private func fetchAppleCatalogSongs(
@@ -1505,38 +1457,63 @@ private final class MusicConnectionManager: ObservableObject {
         var results: [DemoSong] = []
         var seenKeys = Set(seedSongs.map { normalizedSongKey(title: $0.title, artist: $0.artist) })
         var seenStoreIDs = Set(seedSongs.compactMap(\.storeID))
-        let palettes = DemoSong.library.map(\.colors)
 
         for query in queries {
             guard results.count < maxCount else { break }
             do {
-                let tracks = try await ITunesSearchClient.search(term: query, limit: 8)
-                for track in tracks {
-                    guard results.count < maxCount else { break }
-                    let songKey = normalizedSongKey(title: track.trackName, artist: track.artistName)
-                    guard seenKeys.insert(songKey).inserted else { continue }
-                    guard seenStoreIDs.insert(track.trackID).inserted else { continue }
-
-                    let artworkImage = await ITunesSearchClient.artworkImage(from: track.artworkURL100)
-                    let palette = palettes[(results.count + query.count) % palettes.count]
-                    let magicColor = artworkImage?.magicAverageColor ?? UIColor(songPalette: palette)
-                    results.append(
-                        DemoSong(
-                            id: idBase + (Int(track.trackID) ?? results.count) % 8_000,
-                            title: track.trackName,
-                            artist: track.artistName,
-                            colors: palette,
-                            storeID: track.trackID,
-                            artworkImage: artworkImage,
-                            backdropImage: artworkImage?.playerBackdropImage,
-                            magicColor: Color(uiColor: magicColor),
-                            source: .recommendation
-                        )
-                    )
+                let tracks = try await ITunesSearchClient.search(term: query, limit: 10)
+                let songs = await songs(
+                    from: tracks,
+                    seedSongs: seedSongs + results,
+                    maxCount: maxCount - results.count,
+                    idBase: idBase + results.count
+                )
+                for song in songs {
+                    guard seenKeys.insert(normalizedSongKey(title: song.title, artist: song.artist)).inserted else { continue }
+                    guard seenStoreIDs.insert(song.storeID ?? "\(song.id)").inserted else { continue }
+                    results.append(song)
                 }
             } catch {
                 continue
             }
+        }
+
+        return results
+    }
+
+    private func songs(
+        from tracks: [ITunesTrack],
+        seedSongs: [DemoSong],
+        maxCount: Int,
+        idBase: Int
+    ) async -> [DemoSong] {
+        var results: [DemoSong] = []
+        var seenKeys = Set(seedSongs.map { normalizedSongKey(title: $0.title, artist: $0.artist) })
+        var seenStoreIDs = Set(seedSongs.compactMap(\.storeID))
+        let palettes = DemoSong.library.map(\.colors)
+
+        for track in tracks {
+            guard results.count < maxCount else { break }
+            let songKey = normalizedSongKey(title: track.trackName, artist: track.artistName)
+            guard seenKeys.insert(songKey).inserted else { continue }
+            guard seenStoreIDs.insert(track.trackID).inserted else { continue }
+
+            let artworkImage = await ITunesSearchClient.artworkImage(from: track.artworkURL100)
+            let palette = palettes[(results.count + track.trackName.count) % palettes.count]
+            let magicColor = artworkImage?.magicAverageColor ?? UIColor(songPalette: palette)
+            results.append(
+                DemoSong(
+                    id: idBase + (Int(track.trackID) ?? results.count) % 80_000,
+                    title: track.trackName,
+                    artist: track.artistName,
+                    colors: palette,
+                    storeID: track.trackID,
+                    artworkImage: artworkImage,
+                    backdropImage: artworkImage?.playerBackdropImage,
+                    magicColor: Color(uiColor: magicColor),
+                    source: .recommendation
+                )
+            )
         }
 
         return results
@@ -1583,7 +1560,18 @@ private final class MusicConnectionManager: ObservableObject {
             ]
         }
         let editorial = [
-            "apple music editors picks",
+            "Apple Music Today's Hits",
+            "Apple Music Pop",
+            "Apple Music New Music Daily",
+            "Apple Music New Releases",
+            "Apple Music Hits",
+            "Apple Music Pop Hits",
+            "Apple Music A-List Pop",
+            "Apple Music new songs",
+            "Apple Music latest releases",
+            "popular music playlist",
+            "new music playlist",
+            "new pop releases",
             "new music daily",
             "today hits",
             "global pop hits",
@@ -3084,6 +3072,7 @@ private enum ITunesSearchClient {
         var components = URLComponents(string: "https://itunes.apple.com/search")
         components?.queryItems = [
             URLQueryItem(name: "term", value: term),
+            URLQueryItem(name: "country", value: AppleMusicStorefront.current),
             URLQueryItem(name: "media", value: "music"),
             URLQueryItem(name: "entity", value: "song"),
             URLQueryItem(name: "limit", value: "\(limit)")
@@ -3110,7 +3099,33 @@ private enum ITunesSearchClient {
     }
 }
 
+private enum AppleMusicRSSClient {
+    static func topSongs(limit: Int) async throws -> [ITunesTrack] {
+        let safeLimit = min(max(limit, 10), 50)
+        let urlString = "https://rss.marketingtools.apple.com/api/v2/\(AppleMusicStorefront.current)/music/most-played/\(safeLimit)/songs.json"
+        guard let url = URL(string: urlString) else { return [] }
+
+        let (data, _) = try await URLSession.shared.data(from: url)
+        let response = try JSONDecoder().decode(AppleMusicRSSResponse.self, from: data)
+        return response.feed.results
+    }
+}
+
+private enum AppleMusicStorefront {
+    static var current: String {
+        Locale.current.region?.identifier.lowercased() ?? "cn"
+    }
+}
+
 private struct ITunesSearchResponse: Decodable {
+    let results: [ITunesTrack]
+}
+
+private struct AppleMusicRSSResponse: Decodable {
+    let feed: AppleMusicRSSFeed
+}
+
+private struct AppleMusicRSSFeed: Decodable {
     let results: [ITunesTrack]
 }
 
@@ -3122,16 +3137,27 @@ private struct ITunesTrack: Decodable {
 
     private enum CodingKeys: String, CodingKey {
         case trackID = "trackId"
+        case id
         case trackName
+        case name
         case artistName
         case artworkURL100 = "artworkUrl100"
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        let numericID = try container.decode(Int.self, forKey: .trackID)
-        trackID = String(numericID)
-        trackName = try container.decode(String.self, forKey: .trackName)
+        if let numericID = try? container.decode(Int.self, forKey: .trackID) {
+            trackID = String(numericID)
+        } else if let stringID = try? container.decode(String.self, forKey: .trackID) {
+            trackID = stringID
+        } else {
+            trackID = try container.decode(String.self, forKey: .id)
+        }
+        if let trackName = try? container.decode(String.self, forKey: .trackName) {
+            self.trackName = trackName
+        } else {
+            self.trackName = try container.decode(String.self, forKey: .name)
+        }
         artistName = try container.decode(String.self, forKey: .artistName)
         artworkURL100 = try container.decodeIfPresent(String.self, forKey: .artworkURL100)
     }
@@ -3263,16 +3289,9 @@ private struct HomeInteractiveSongSquare: View {
     let progress: CGFloat
     let variation: HomeFlipVariation
     let onTap: () -> Void
-    let onDragChanged: (DemoSong, CGPoint, CGPoint) -> Void
-    let onDragEnded: (DemoSong, CGPoint, CGPoint) -> Void
-
-    @State private var isDraggingFromLongPress = false
 
     var body: some View {
-        GeometryReader { proxy in
-            let frame = proxy.frame(in: .global)
-            let startLocation = CGPoint(x: frame.midX, y: frame.midY)
-
+        GeometryReader { _ in
             HomeFlipSongSquare(
                 frontSong: frontSong,
                 backSong: backSong,
@@ -3281,88 +3300,10 @@ private struct HomeInteractiveSongSquare: View {
                 variation: variation
             )
             .contentShape(RoundedRectangle(cornerRadius: 8))
-            .onTapGesture {
-                guard isDraggingFromLongPress == false else { return }
-                onTap()
-            }
-            .highPriorityGesture(
-                LongPressGesture(minimumDuration: 0.24, maximumDistance: 18)
-                    .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .global))
-                    .onChanged { value in
-                        switch value {
-                        case .first(true):
-                            guard isDraggingFromLongPress == false else { return }
-                            isDraggingFromLongPress = true
-                            onDragChanged(displayedSong, startLocation, startLocation)
-                        case .second(true, let drag):
-                            if isDraggingFromLongPress == false {
-                                isDraggingFromLongPress = true
-                                onDragChanged(displayedSong, startLocation, startLocation)
-                            }
-                            onDragChanged(displayedSong, startLocation, drag?.location ?? startLocation)
-                        default:
-                            break
-                        }
-                    }
-                    .onEnded { value in
-                        defer { isDraggingFromLongPress = false }
-                        switch value {
-                        case .second(true, let drag):
-                            onDragEnded(displayedSong, startLocation, drag?.location ?? startLocation)
-                        case .first(true):
-                            onDragEnded(displayedSong, startLocation, startLocation)
-                        default:
-                            break
-                        }
-                    }
-            )
+            .onTapGesture(perform: onTap)
         }
         .frame(maxWidth: .infinity)
         .aspectRatio(1, contentMode: .fit)
-    }
-}
-
-private struct HomeDraggedSongPreview: View {
-    let song: DemoSong
-    let isOverPlayerBar: Bool
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            ZStack {
-                LinearGradient(colors: song.colors, startPoint: .topLeading, endPoint: .bottomTrailing)
-
-                if let artworkImage = song.artworkImage {
-                    Image(uiImage: artworkImage)
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
-                }
-            }
-            .frame(maxWidth: .infinity)
-            .aspectRatio(1, contentMode: .fit)
-            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text(song.title.isEmpty ? "准备播放" : song.title)
-                    .font(.system(size: 21, weight: .black))
-                    .foregroundStyle(.white)
-                    .lineLimit(2)
-                    .minimumScaleFactor(0.66)
-
-                Text(song.artist.isEmpty ? "拖到底部播放" : song.artist)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.70))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.72)
-            }
-        }
-        .padding(12)
-        .background(.black.opacity(isOverPlayerBar ? 0.82 : 0.70))
-        .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 26, style: .continuous)
-                .stroke(.white.opacity(isOverPlayerBar ? 0.28 : 0.14), lineWidth: 1)
-        }
-        .shadow(color: .black.opacity(0.34), radius: 24, y: 14)
     }
 }
 
