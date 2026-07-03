@@ -191,28 +191,7 @@ struct ContentView: View {
             .blur(radius: settingsBackdropBlur + playerBackdropBlur, opaque: false)
             .animation(.smooth(duration: 0.24, extraBounce: 0.0), value: activeTab)
             .animation(.smooth(duration: 0.24, extraBounce: 0.0), value: isPlayerCardVisible)
-            .animation(.easeInOut(duration: 0.18), value: musicConnector.showPlaybackLoadingToast)
             .zIndex(8)
-
-            if musicConnector.showPlaybackLoadingToast {
-                Text("歌曲加载中...")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.68))
-                    .lineLimit(1)
-                    .fixedSize()
-                    .position(
-                        x: proxy.size.width / 2,
-                        y: playbackLoadingLabelY(
-                            in: proxy.size,
-                            bottomSafeArea: proxy.safeAreaInsets.bottom
-                        )
-                    )
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .allowsHitTesting(false)
-                    .ignoresSafeArea(edges: .bottom)
-                    .transition(.opacity)
-                    .zIndex(9)
-            }
 
             if activeTab == .settings {
                 Color.black.opacity(0.48)
@@ -316,24 +295,6 @@ struct ContentView: View {
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
         let playbackSongs = songs
         Task { await musicConnector.togglePlayback(for: nowPlaying, in: playbackSongs) }
-    }
-
-    private func playbackLoadingLabelY(in size: CGSize, bottomSafeArea: CGFloat) -> CGFloat {
-        let gap: CGFloat = 20
-        let labelHalfHeight: CGFloat = 8
-        let visibleBottom = size.height + max(bottomSafeArea, 0)
-
-        guard !playerPillFrame.isEmpty else {
-            return visibleBottom - labelHalfHeight - 6
-        }
-
-        let belowBarY = playerPillFrame.maxY + gap + labelHalfHeight
-        if belowBarY + labelHalfHeight <= visibleBottom - 4 {
-            return belowBarY
-        }
-
-        let aboveBarY = playerPillFrame.minY - gap - labelHalfHeight
-        return max(labelHalfHeight + 4, aboveBarY)
     }
 
     private func playAdjacentSong(step: Int) {
@@ -2211,16 +2172,9 @@ private final class MusicConnectionManager: ObservableObject {
 
     private func beginPlaybackLoading() {
         playbackLoadingTask?.cancel()
+        playbackLoadingTask = nil
         isPlaybackTransitioning = true
         showPlaybackLoadingToast = false
-        playbackLoadingTask = Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(220))
-            guard !Task.isCancelled else { return }
-            showPlaybackLoadingToast = true
-            try? await Task.sleep(for: .milliseconds(520))
-            guard !Task.isCancelled else { return }
-            isPlaybackTransitioning = false
-        }
     }
 
     private func endPlaybackLoading() {
@@ -3190,8 +3144,8 @@ private struct BottomNavigationBar: View {
     let onNext: () -> Void
 
     private var pillWidth: CGFloat {
-        let title = isPlaying ? nowPlaying.title : "FlipMusic"
-        let subtitle = isPlaying ? nowPlaying.artist : "A simple way to listen music"
+        let title = isPlaybackLoading ? "歌曲加载中" : (isPlaying ? nowPlaying.title : "FlipMusic")
+        let subtitle = isPlaybackLoading ? "" : (isPlaying ? nowPlaying.artist : "A simple way to listen music")
         let titleWidth = measuredTextWidth(title, size: 14, weight: .bold)
         let subtitleWidth = measuredTextWidth(subtitle, size: isPlaying ? 12 : 11, weight: .medium)
         let textWidth = max(titleWidth, subtitleWidth)
@@ -4412,7 +4366,7 @@ private struct PlayerPill: View {
                     .animation(.smooth(duration: 0.16, extraBounce: 0.0), value: committedArtworkOffset)
                     .animation(.smooth(duration: 0.12, extraBounce: 0.0), value: dragTranslation)
 
-                PlayerPillSongText(song: song, isPlaying: isPlaying)
+                PlayerPillSongText(song: song, isPlaying: isPlaying, isLoading: isPlaybackLoading)
                     .id(song.id)
                     .opacity(isTextVisible ? max(0.18, 1 - abs(boundedDragOffset) / 120) : 0)
                     .offset(x: boundedDragOffset * 0.18)
@@ -4682,21 +4636,42 @@ private struct PlayerPillPlaybackButtonIcon: View {
 private struct PlayerPillSongText: View {
     let song: DemoSong
     let isPlaying: Bool
+    let isLoading: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(isPlaying ? song.title : "FlipMusic")
-                .font(.system(size: 14, weight: .bold))
-                .foregroundStyle(.white)
-                .lineLimit(1)
-                .minimumScaleFactor(0.68)
+        ZStack(alignment: .leading) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(isPlaying ? song.title : "FlipMusic")
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.68)
 
-            Text(isPlaying ? song.artist : "A simple way to listen music")
-                .font(.system(size: isPlaying ? 12 : 11, weight: .medium))
-                .foregroundStyle(.white.opacity(0.82))
-                .lineLimit(1)
-                .minimumScaleFactor(0.58)
+                Text(isPlaying ? song.artist : "A simple way to listen music")
+                    .font(.system(size: isPlaying ? 12 : 11, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.82))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.58)
+            }
+            .opacity(isLoading ? 0 : 1)
+            .scaleEffect(isLoading ? 0.98 : 1, anchor: .leading)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("歌曲加载中")
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.74)
+
+                Text(" ")
+                    .font(.system(size: 12, weight: .medium))
+                    .lineLimit(1)
+            }
+            .opacity(isLoading ? 1 : 0)
+            .scaleEffect(isLoading ? 1 : 0.98, anchor: .leading)
         }
+        .animation(.easeInOut(duration: 0.18), value: isLoading)
+        .animation(.easeInOut(duration: 0.18), value: isPlaying)
     }
 }
 
