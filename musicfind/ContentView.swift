@@ -1193,6 +1193,7 @@ private final class MusicConnectionManager: ObservableObject {
     private var playbackPrefetchTask: Task<Void, Never>?
     private var recommendationTask: Task<Void, Never>?
     private var playbackObservers: [NSObjectProtocol] = []
+    private var playbackRequestID = 0
     private let playbackQueueLimit = 5
     private let playbackPrefetchLimit = 8
     private let discoveryExtraSongLimit = 96
@@ -1532,6 +1533,11 @@ private final class MusicConnectionManager: ObservableObject {
         }
         beginPlaybackLoading()
         queuedPlaybackTask?.cancel()
+        playbackQueueWarmupTask?.cancel()
+        playbackPrefetchTask?.cancel()
+        playbackRequestID &+= 1
+        let requestID = playbackRequestID
+        let queueSnapshot = compactPlaybackQueueSnapshot(startingWith: song, in: queueSongs)
         if playingSongID != song.id {
             playingSongID = song.id
         }
@@ -1543,11 +1549,11 @@ private final class MusicConnectionManager: ObservableObject {
         }
 
         queuedPlaybackTask = Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(12))
-            guard !Task.isCancelled else { return }
+            try? await Task.sleep(for: .milliseconds(88))
+            guard !Task.isCancelled, requestID == playbackRequestID else { return }
             let player = MPMusicPlayerController.applicationMusicPlayer
-            setPlaybackQueue(on: player, startingWith: song, in: queueSongs)
-            prepareAndStartPlayback(on: player, song: song, queueSongs: queueSongs)
+            setPlaybackQueue(on: player, startingWith: song, in: queueSnapshot)
+            prepareAndStartPlayback(on: player, song: song, queueSongs: queueSnapshot, requestID: requestID)
         }
     }
 
@@ -1725,18 +1731,23 @@ private final class MusicConnectionManager: ObservableObject {
         prepareImmediatePlaybackQueue(on: player, startingWith: song)
     }
 
-    private func prepareAndStartPlayback(on player: MPMusicPlayerController, song: DemoSong, queueSongs: [DemoSong]?) {
+    private func prepareAndStartPlayback(
+        on player: MPMusicPlayerController,
+        song: DemoSong,
+        queueSongs: [DemoSong]?,
+        requestID: Int
+    ) {
         player.prepareToPlay { [weak self] error in
             Task { @MainActor in
-                guard let self, self.playingSongID == song.id else { return }
+                guard let self, self.playingSongID == song.id, self.playbackRequestID == requestID else { return }
                 if let error {
                     self.endPlaybackLoading()
                     self.message = "加载这首歌有点慢：\(error.localizedDescription)"
                     return
                 }
                 player.play()
-                self.scheduleContinuousQueueWarmup(startingWith: song, in: queueSongs)
-                self.schedulePlaybackPrefetch(startingWith: song, in: queueSongs)
+                self.scheduleContinuousQueueWarmup(startingWith: song, in: queueSongs, requestID: requestID)
+                self.schedulePlaybackPrefetch(startingWith: song, in: queueSongs, requestID: requestID)
                 self.endPlaybackLoading()
                 self.message = "正在播放：\(song.title)"
             }
@@ -1752,22 +1763,22 @@ private final class MusicConnectionManager: ObservableObject {
         }
     }
 
-    private func scheduleContinuousQueueWarmup(startingWith song: DemoSong, in queueSongs: [DemoSong]?) {
+    private func scheduleContinuousQueueWarmup(startingWith song: DemoSong, in queueSongs: [DemoSong]?, requestID: Int) {
         playbackQueueWarmupTask?.cancel()
 
         playbackQueueWarmupTask = Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(1200))
-            guard !Task.isCancelled, playingSongID == song.id, isPlaying else { return }
+            guard !Task.isCancelled, playbackRequestID == requestID, playingSongID == song.id, isPlaying else { return }
             let player = MPMusicPlayerController.applicationMusicPlayer
             prepareContinuousQueue(on: player, startingWith: song, in: queueSongs)
         }
     }
 
-    private func schedulePlaybackPrefetch(startingWith song: DemoSong, in queueSongs: [DemoSong]?) {
+    private func schedulePlaybackPrefetch(startingWith song: DemoSong, in queueSongs: [DemoSong]?, requestID: Int) {
         playbackPrefetchTask?.cancel()
         playbackPrefetchTask = Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(780))
-            guard !Task.isCancelled, playingSongID == song.id else { return }
+            guard !Task.isCancelled, playbackRequestID == requestID, playingSongID == song.id else { return }
 
             let upcomingSongs = playbackQueueSongs(startingWith: song, in: queueSongs)
             PlayerArtworkWarmupCache.shared.preload(songs: Array(upcomingSongs.dropFirst().prefix(playbackPrefetchLimit)))
@@ -1776,9 +1787,18 @@ private final class MusicConnectionManager: ObservableObject {
             let page = nextPlaybackPrefetchPage
             guard loadedPlaybackPrefetchPages.insert(page).inserted else { return }
             try? await Task.sleep(for: .milliseconds(420))
-            guard !Task.isCancelled, playingSongID == song.id else { return }
+            guard !Task.isCancelled, playbackRequestID == requestID, playingSongID == song.id else { return }
             _ = await loadMoreDiscoverySongs(page: page)
         }
+    }
+
+    private func compactPlaybackQueueSnapshot(startingWith song: DemoSong, in queueSongs: [DemoSong]?) -> [DemoSong] {
+        var snapshot = playbackQueueSongs(startingWith: song, in: queueSongs)
+        if snapshot.first?.id != song.id {
+            snapshot.removeAll { $0.id == song.id }
+            snapshot.insert(song, at: 0)
+        }
+        return Array(snapshot.prefix(playbackQueueLimit))
     }
 
     private func prepareContinuousQueue(
