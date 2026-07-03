@@ -205,7 +205,7 @@ struct ContentView: View {
                             playerPillFrame.isEmpty
                                 ? proxy.size.height - proxy.safeAreaInsets.bottom - 6
                                 : min(
-                                    playerPillFrame.minY + 78,
+                                    playerPillFrame.minY + 178,
                                     proxy.size.height - max(proxy.safeAreaInsets.bottom, 8) - 8
                                 )
                         )
