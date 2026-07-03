@@ -203,8 +203,11 @@ struct ContentView: View {
                         y: max(
                             proxy.safeAreaInsets.top + 92,
                             playerPillFrame.isEmpty
-                                ? proxy.size.height - proxy.safeAreaInsets.bottom - 106
-                                : playerPillFrame.minY - 22
+                                ? proxy.size.height - proxy.safeAreaInsets.bottom - 6
+                                : min(
+                                    playerPillFrame.minY + 78,
+                                    proxy.size.height - max(proxy.safeAreaInsets.bottom, 8) - 8
+                                )
                         )
                     )
                     .allowsHitTesting(false)
