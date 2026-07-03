@@ -36,6 +36,7 @@ struct ContentView: View {
     @State private var isHomeAppendingMore = false
     @State private var homeLoadMorePage = 0
     @State private var temporarilySkippedHomeSongIDs: [Int] = []
+    @State private var pendingHomePlaybackTask: Task<Void, Never>?
     @StateObject private var shakeObserver = ShakeMotionObserver()
     @State private var homeIdleTask: Task<Void, Never>?
     @State private var homeFlipTask: Task<Void, Never>?
@@ -78,10 +79,7 @@ struct ContentView: View {
                                     progress: homeFlipLocalProgress(for: slot),
                                     variation: homeFlipVariations[slot.id] ?? .zero,
                                     onTap: {
-                                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                                        registerHomeInteraction()
-                                        nowPlaying = slot.song
-                                        musicConnector.queuePlayback(for: slot.song, in: visibleHomeSongs)
+                                        playHomeSong(slot.song)
                                     }
                                 )
                                 .onAppear {
@@ -246,6 +244,8 @@ struct ContentView: View {
         }
         .onDisappear {
             musicConnector.stopPlaybackSync()
+            pendingHomePlaybackTask?.cancel()
+            pendingHomePlaybackTask = nil
             resetHomeFlipState()
             stopHomeDrift()
             shakeObserver.stop()
@@ -278,6 +278,35 @@ struct ContentView: View {
         .onReceive(shakeObserver.$shakeEventID.dropFirst()) { _ in
             reshuffleHomeSongsWithFlip()
         }
+    }
+
+    private func playHomeSong(_ song: DemoSong) {
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        registerHomeInteraction()
+
+        guard song.isPlayable, song.isPlaceholder == false else {
+            musicConnector.message = "这首暂时没有可播放资源。"
+            return
+        }
+
+        pendingHomePlaybackTask?.cancel()
+        let queueSnapshot = compactHomePlaybackSnapshot(startingWith: song)
+        pendingHomePlaybackTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(72))
+            guard !Task.isCancelled else { return }
+            nowPlaying = song
+            musicConnector.queuePlayback(for: song, in: queueSnapshot)
+        }
+    }
+
+    private func compactHomePlaybackSnapshot(startingWith song: DemoSong) -> [DemoSong] {
+        let playableSongs = visibleHomeSongs.filter { $0.isPlayable && $0.isPlaceholder == false }
+        guard playableSongs.isEmpty == false else { return [song] }
+        guard let selectedIndex = playableSongs.firstIndex(where: { $0.id == song.id }) else {
+            return Array(([song] + playableSongs).prefix(5))
+        }
+        let rotatedSongs = Array(playableSongs[selectedIndex...]) + Array(playableSongs[..<selectedIndex])
+        return Array(rotatedSongs.prefix(5))
     }
 
     private func toggleCurrentPlayback() {
