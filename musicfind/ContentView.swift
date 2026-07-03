@@ -1901,36 +1901,58 @@ private final class MusicConnectionManager: ObservableObject {
         nextPlaybackPrefetchPage = 1
         loadedPlaybackPrefetchPages.removeAll()
 
-        let seedSongs = Array((spotifySongs + (librarySongs.isEmpty ? DemoSong.library : librarySongs)).prefix(24))
+        let seedSongs = Array((spotifySongs + (librarySongs.isEmpty ? DemoSong.library : librarySongs)).prefix(42))
         recommendationTask = Task { @MainActor in
             let recommendations = await fetchAppleCatalogRecommendations(from: seedSongs)
             guard !Task.isCancelled else { return }
             recommendedSongs = recommendations
+            if recommendations.isEmpty == false {
+                message = "AI 已根据 \(seedSongs.count) 首歌推荐 \(recommendations.count) 首"
+            }
         }
     }
 
     private func fetchAppleCatalogRecommendations(from seedSongs: [DemoSong]) async -> [DemoSong] {
-        let chartSongs = await fetchAppleChartSongs(seedSongs: seedSongs, maxCount: 18)
-        let latestSongs = await fetchAppleCatalogSongs(
-            queries: latestReleaseQueries(from: seedSongs),
-            seedSongs: seedSongs + chartSongs,
+        let profile = musicTasteProfile(from: seedSongs)
+        let artistRadioSongs = await fetchAppleCatalogSongs(
+            queries: artistRadioQueries(from: profile),
+            seedSongs: seedSongs,
+            maxCount: 20,
+            idBase: 200_000,
+            profile: profile
+        )
+        let styleSongs = await fetchAppleCatalogSongs(
+            queries: styleRecommendationQueries(from: profile),
+            seedSongs: seedSongs + artistRadioSongs,
             maxCount: 24,
-            idBase: 200_000
+            idBase: 220_000,
+            profile: profile
         )
-        let searchSongs = await fetchAppleCatalogSongs(
-            queries: recommendationQueries(from: seedSongs),
-            seedSongs: seedSongs + chartSongs + latestSongs,
-            maxCount: 36,
-            idBase: 220_000
+        let latestSongs = await fetchAppleCatalogSongs(
+            queries: latestReleaseQueries(from: profile),
+            seedSongs: seedSongs + artistRadioSongs + styleSongs,
+            maxCount: 24,
+            idBase: 240_000,
+            profile: profile
         )
-        return Array(uniqueDiscoverySongs(from: latestSongs + chartSongs + searchSongs).prefix(60))
+        let chartSongs = await fetchAppleChartSongs(
+            seedSongs: seedSongs + artistRadioSongs + styleSongs + latestSongs,
+            maxCount: 18,
+            profile: profile
+        )
+        return Array(uniqueDiscoverySongs(from: artistRadioSongs + styleSongs + latestSongs + chartSongs).prefix(64))
     }
 
-    private func fetchAppleChartSongs(seedSongs: [DemoSong], maxCount: Int) async -> [DemoSong] {
+    private func fetchAppleChartSongs(
+        seedSongs: [DemoSong],
+        maxCount: Int,
+        profile: MusicTasteProfile
+    ) async -> [DemoSong] {
         do {
             let tracks = try await AppleMusicRSSClient.topSongs(limit: 50)
+            let rankedTracks = rankedRecommendationTracks(tracks, seedSongs: seedSongs, profile: profile)
             return await songs(
-                from: tracks,
+                from: rankedTracks,
                 seedSongs: seedSongs,
                 maxCount: maxCount,
                 idBase: 180_000
@@ -1944,7 +1966,8 @@ private final class MusicConnectionManager: ObservableObject {
         queries: [String],
         seedSongs: [DemoSong],
         maxCount: Int,
-        idBase: Int
+        idBase: Int,
+        profile: MusicTasteProfile? = nil
     ) async -> [DemoSong] {
         var results: [DemoSong] = []
         var seenKeys = Set(seedSongs.map { normalizedSongKey(title: $0.title, artist: $0.artist) })
@@ -1954,8 +1977,11 @@ private final class MusicConnectionManager: ObservableObject {
             guard results.count < maxCount else { break }
             do {
                 let tracks = try await ITunesSearchClient.search(term: query, limit: 18)
+                let rankedTracks = profile.map {
+                    rankedRecommendationTracks(tracks, seedSongs: seedSongs + results, profile: $0)
+                } ?? tracks.prioritizingRecentReleases
                 let songs = await songs(
-                    from: tracks.prioritizingRecentReleases,
+                    from: rankedTracks,
                     seedSongs: seedSongs + results,
                     maxCount: maxCount - results.count,
                     idBase: idBase + results.count
@@ -2012,6 +2038,9 @@ private final class MusicConnectionManager: ObservableObject {
     }
 
     private func moreDiscoveryQueries(page: Int) -> [String] {
+        let profile = musicTasteProfile(
+            from: Array((spotifySongs + librarySongs + recommendedSongs + DemoSong.library).prefix(56))
+        )
         let timeBased: [String]
         switch HomeTimeMood.current {
         case .morning:
@@ -2051,77 +2080,79 @@ private final class MusicConnectionManager: ObservableObject {
                 "midnight drive music"
             ]
         }
-        let editorial = [
-            "Apple Music Today's Hits",
-            "Apple Music Pop",
-            "Apple Music New Music Daily",
-            "Apple Music New Releases",
-            "Apple Music Hits",
-            "Apple Music Pop Hits",
-            "Apple Music A-List Pop",
-            "Apple Music new songs",
-            "Apple Music latest releases",
-            "popular music playlist",
-            "new music playlist",
-            "new pop releases",
-            "new music daily",
-            "today hits",
-            "global pop hits",
-            "indie pop new",
-            "fresh finds music",
-            "daily top songs",
-            "hot tracks"
-        ]
-        let mood = [
-            "night drive songs",
-            "morning pop songs",
-            "chill electronic",
-            "alternative discoveries",
-            "dance pop radio",
-            "cinematic pop",
-            "soft rock essentials",
-            "r&b favorites"
-        ]
-        let style = inferredStyleTerms(from: librarySongs).map { "\($0) recommendations" }
-        let pool = (page % 2 == 0 ? timeBased + style + editorial + mood : timeBased + mood + style + editorial)
+        let profileQueries = styleRecommendationQueries(from: profile) + artistRadioQueries(from: profile)
+        let latestQueries = latestReleaseQueries(from: profile)
+        let pool = (page % 2 == 0 ? timeBased + profileQueries + latestQueries : profileQueries + timeBased + latestQueries)
         let start = (page * 4) % max(pool.count, 1)
         return (0..<8).map { pool[(start + $0) % pool.count] }
     }
 
-    private func latestReleaseQueries(from songs: [DemoSong]) -> [String] {
-        let recentArtistQueries = topArtists(from: songs, limit: 6).flatMap { artist in
+    private struct MusicTasteProfile {
+        let seedCount: Int
+        let topArtists: [String]
+        let titleTokens: [String]
+        let styleQueries: [String]
+        let moodQueries: [String]
+        let seedRadioQueries: [String]
+    }
+
+    private func musicTasteProfile(from songs: [DemoSong]) -> MusicTasteProfile {
+        let realSongs = songs.filter { !$0.isPlaceholder }
+        let artists = topArtists(from: realSongs, limit: 10)
+        let titleTokens = weightedTokens(from: realSongs, limit: 12)
+        let styleQueries = inferredTasteQueries(from: realSongs, titleTokens: titleTokens)
+        let moodQueries = moodQueriesForCurrentTime()
+        let seedRadioQueries = realSongs.prefix(8).map { song in
+            "\(song.title) \(song.artist) similar songs"
+        }
+
+        return MusicTasteProfile(
+            seedCount: realSongs.count,
+            topArtists: artists,
+            titleTokens: titleTokens,
+            styleQueries: styleQueries,
+            moodQueries: moodQueries,
+            seedRadioQueries: seedRadioQueries
+        )
+    }
+
+    private func artistRadioQueries(from profile: MusicTasteProfile) -> [String] {
+        let artistQueries = profile.topArtists.prefix(8).flatMap { artist in
+            [
+                "\(artist) similar artists songs",
+                "\(artist) radio songs",
+                "\(artist) fans also like"
+            ]
+        }
+        return Array(uniqueQueries(profile.seedRadioQueries + artistQueries).prefix(26))
+    }
+
+    private func latestReleaseQueries(from profile: MusicTasteProfile) -> [String] {
+        let recentArtistQueries = profile.topArtists.prefix(8).flatMap { artist in
             [
                 "\(artist) latest song",
                 "\(artist) new single",
                 "\(artist) new release"
             ]
         }
-        let editorialQueries = [
-            "new music Friday pop",
-            "latest pop releases",
-            "new songs this week",
-            "today new music",
-            "new release pop",
-            "fresh pop singles",
-            "Madonna Confessions II",
-            "Madonna new song",
-            "Charli xcx latest song",
-            "Charli xcx Wink Wink",
-            "Charli xcx SS26"
-        ]
-        return Array((recentArtistQueries + editorialQueries).prefix(28))
-    }
-
-    private func recommendationQueries(from songs: [DemoSong]) -> [String] {
-        let artists = topArtists(from: songs, limit: 8)
-        let styleTerms = inferredStyleTerms(from: songs)
-        let artistQueries = artists.flatMap { artist in
+        let tokenQueries = profile.titleTokens.prefix(6).map { "\($0) new songs" }
+        let styleLatestQueries = profile.styleQueries.flatMap { query in
             [
-                "\(artist) latest songs",
-                "\(artist) top songs"
+                "\(query) new releases",
+                "\(query) latest songs"
             ]
         }
-        return Array((artistQueries + styleTerms).prefix(14))
+        return Array(uniqueQueries(recentArtistQueries + styleLatestQueries + tokenQueries).prefix(34))
+    }
+
+    private func styleRecommendationQueries(from profile: MusicTasteProfile) -> [String] {
+        let tokenQueries = profile.titleTokens.prefix(8).flatMap { token in
+            [
+                "\(token) music recommendations",
+                "\(token) similar songs"
+            ]
+        }
+        return Array(uniqueQueries(profile.styleQueries + profile.moodQueries + tokenQueries).prefix(30))
     }
 
     private func topArtists(from songs: [DemoSong], limit: Int) -> [String] {
@@ -2134,25 +2165,168 @@ private final class MusicConnectionManager: ObservableObject {
         )
     }
 
-    private func inferredStyleTerms(from songs: [DemoSong]) -> [String] {
+    private func inferredTasteQueries(from songs: [DemoSong], titleTokens: [String]) -> [String] {
         let text = songs.map { "\($0.title) \($0.artist)" }.joined(separator: " ").lowercased()
-        var terms: [String] = []
-        if text.contains("taylor") || text.contains("sabrina") || text.contains("dua") {
-            terms.append(contentsOf: ["fresh pop hits", "dance pop essentials"])
+        let tokenSet = Set(titleTokens)
+        var queries: [String] = []
+
+        func hasAny(_ terms: [String]) -> Bool {
+            terms.contains { text.contains($0) || tokenSet.contains($0) }
         }
-        if text.contains("u2") || text.contains("rolling") || text.contains("rock") {
-            terms.append(contentsOf: ["alternative rock essentials", "modern rock songs"])
+
+        if hasAny(["pop", "dance", "club", "brat", "hyperpop", "charli", "xcx", "dua", "madonna", "sabrina"]) {
+            queries.append(contentsOf: ["dance pop discoveries", "electropop new music", "club pop tracks", "hyperpop new releases"])
         }
-        if text.contains("justin") || text.contains("weeknd") || text.contains("r&b") {
-            terms.append(contentsOf: ["smooth r&b pop", "night drive pop"])
+        if hasAny(["r&b", "rnb", "soul", "weeknd", "sza", "frank", "justin", "usher"]) {
+            queries.append(contentsOf: ["alternative r&b discoveries", "smooth r&b pop", "night drive r&b"])
         }
-        if text.contains("joe hisaishi") || text.contains("soundtrack") || text.contains("classical") {
-            terms.append(contentsOf: ["cinematic soundtrack", "modern classical calm"])
+        if hasAny(["rap", "hip", "hop", "trap", "drake", "kendrick", "tyler", "asap"]) {
+            queries.append(contentsOf: ["melodic rap discoveries", "alternative hip hop new", "hip hop radio songs"])
         }
-        if terms.isEmpty {
-            terms = ["indie pop essentials", "new music discovery", "chill pop songs", "alternative favorites"]
+        if hasAny(["rock", "indie", "band", "guitar", "oasis", "u2", "radiohead"]) {
+            queries.append(contentsOf: ["indie rock discoveries", "modern rock songs", "alternative favorites"])
         }
-        return terms
+        if hasAny(["electronic", "house", "techno", "edm", "calvin", "fred", "ambient"]) {
+            queries.append(contentsOf: ["electronic pop discoveries", "house music new", "chill electronic"])
+        }
+        if hasAny(["jazz", "piano", "garner", "coltrane", "swing", "bossa"]) {
+            queries.append(contentsOf: ["modern jazz discoveries", "vocal jazz essentials", "piano jazz songs"])
+        }
+        if hasAny(["soundtrack", "score", "cinematic", "classical", "hisaishi", "movie"]) {
+            queries.append(contentsOf: ["cinematic soundtrack", "modern classical calm", "film score essentials"])
+        }
+
+        if queries.isEmpty {
+            queries = titleTokens.prefix(5).map { "\($0) songs" }
+        }
+        if queries.isEmpty {
+            queries = ["new music discovery", "indie pop essentials", "fresh pop singles", "alternative discoveries"]
+        }
+        return uniqueQueries(queries)
+    }
+
+    private func moodQueriesForCurrentTime() -> [String] {
+        switch HomeTimeMood.current {
+        case .morning:
+            return ["morning music recommendations", "bright indie pop", "coffeehouse pop"]
+        case .afternoon:
+            return ["workday energy songs", "feel good pop", "today hits"]
+        case .evening:
+            return ["evening chill songs", "night drive songs", "cinematic pop"]
+        case .lateNight:
+            return ["late night songs", "dream pop playlist", "after dark r&b"]
+        }
+    }
+
+    private func weightedTokens(from songs: [DemoSong], limit: Int) -> [String] {
+        let stopwords: Set<String> = [
+            "the", "and", "with", "feat", "ft", "for", "from", "you", "your", "me", "my", "we", "our",
+            "love", "song", "music", "official", "remix", "version", "edit", "live", "radio", "single",
+            "album", "unknown", "artist"
+        ]
+        var counts: [String: Int] = [:]
+        for song in songs {
+            let words = "\(song.title) \(song.artist)"
+                .lowercased()
+                .replacingOccurrences(of: #"[^a-z0-9&]+"#, with: " ", options: .regularExpression)
+                .split(separator: " ")
+                .map(String.init)
+            for word in words where word.count >= 3 && stopwords.contains(word) == false {
+                counts[word, default: 0] += song.source == .spotify ? 2 : 1
+            }
+        }
+        return Array(counts
+            .sorted {
+                if $0.value == $1.value { return $0.key < $1.key }
+                return $0.value > $1.value
+            }
+            .map(\.key)
+            .prefix(limit))
+    }
+
+    private func rankedRecommendationTracks(
+        _ tracks: [ITunesTrack],
+        seedSongs: [DemoSong],
+        profile: MusicTasteProfile
+    ) -> [ITunesTrack] {
+        let seedKeys = Set(seedSongs.map { normalizedSongKey(title: $0.title, artist: $0.artist) })
+        let seedStoreIDs = Set(seedSongs.compactMap(\.storeID))
+        let seedArtists = Set(seedSongs.map { normalizedArtistForRecommendation($0.artist) })
+        let topArtists = Set(profile.topArtists.map { normalizedArtistForRecommendation($0) })
+        let tokens = Set(profile.titleTokens)
+
+        return tracks
+            .filter { track in
+                seedKeys.contains(normalizedSongKey(title: track.trackName, artist: track.artistName)) == false
+                && seedStoreIDs.contains(track.trackID) == false
+            }
+            .prioritizingRecentReleases
+            .sorted { lhs, rhs in
+                let lhsScore = recommendationScore(
+                    for: lhs,
+                    seedArtists: seedArtists,
+                    topArtists: topArtists,
+                    tokens: tokens,
+                    profile: profile
+                )
+                let rhsScore = recommendationScore(
+                    for: rhs,
+                    seedArtists: seedArtists,
+                    topArtists: topArtists,
+                    tokens: tokens,
+                    profile: profile
+                )
+                if lhsScore == rhsScore {
+                    return (lhs.releaseDate ?? .distantPast) > (rhs.releaseDate ?? .distantPast)
+                }
+                return lhsScore > rhsScore
+            }
+    }
+
+    private func recommendationScore(
+        for track: ITunesTrack,
+        seedArtists: Set<String>,
+        topArtists: Set<String>,
+        tokens: Set<String>,
+        profile: MusicTasteProfile
+    ) -> Double {
+        let artist = normalizedArtistForRecommendation(track.artistName)
+        let title = normalizedTitleForRecommendation(track.trackName)
+        let genre = track.primaryGenreName?.lowercased() ?? ""
+        let searchable = "\(artist) \(title) \(genre)"
+        var score = 0.0
+
+        if topArtists.contains(artist) { score += 9 }
+        if seedArtists.contains(artist) == false { score += 1.5 }
+        for token in tokens where searchable.contains(token) {
+            score += 2.4
+        }
+        for query in profile.styleQueries where searchable.contains(query.components(separatedBy: " ").first ?? query) {
+            score += 1.2
+        }
+        if let releaseDate = track.releaseDate {
+            let days = Date().timeIntervalSince(releaseDate) / 86_400
+            if days <= 45 { score += 8 }
+            else if days <= 180 { score += 5 }
+            else if days <= 730 { score += 2 }
+        }
+        if genre.contains("pop") || genre.contains("r&b") || genre.contains("hip-hop") || genre.contains("alternative") {
+            score += 1
+        }
+        return score
+    }
+
+    private func uniqueQueries(_ queries: [String]) -> [String] {
+        var seen = Set<String>()
+        return queries.compactMap { query in
+            let trimmed = query
+                .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.isEmpty == false else { return nil }
+            let key = trimmed.lowercased()
+            guard seen.insert(key).inserted else { return nil }
+            return trimmed
+        }
     }
 
     private func interleavedDiscoverySongs(librarySongs: [DemoSong], recommendedSongs: [DemoSong]) -> [DemoSong] {
@@ -5107,6 +5281,7 @@ private struct ITunesTrack: Decodable {
     let artistName: String
     let artworkURL100: String?
     let releaseDate: Date?
+    let primaryGenreName: String?
 
     private enum CodingKeys: String, CodingKey {
         case trackID = "trackId"
@@ -5116,6 +5291,7 @@ private struct ITunesTrack: Decodable {
         case artistName
         case artworkURL100 = "artworkUrl100"
         case releaseDate
+        case primaryGenreName
     }
 
     init(from decoder: Decoder) throws {
@@ -5134,6 +5310,7 @@ private struct ITunesTrack: Decodable {
         }
         artistName = try container.decode(String.self, forKey: .artistName)
         artworkURL100 = try container.decodeIfPresent(String.self, forKey: .artworkURL100)
+        primaryGenreName = try container.decodeIfPresent(String.self, forKey: .primaryGenreName)
         if let releaseDateString = try container.decodeIfPresent(String.self, forKey: .releaseDate) {
             releaseDate = ISO8601DateFormatter().date(from: releaseDateString)
         } else {
