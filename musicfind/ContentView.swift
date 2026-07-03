@@ -55,6 +55,9 @@ struct ContentView: View {
     private var playerBackdropBlur: CGFloat {
         isPlayerCardVisible ? 18 : 0
     }
+    private var isPlaybackVisuallyActive: Bool {
+        musicConnector.isPlaying || musicConnector.isPlaybackTransitioning
+    }
 
     var body: some View {
         GeometryReader { proxy in
@@ -123,7 +126,7 @@ struct ContentView: View {
                 .opacity(chromeOpacity)
                 .zIndex(1)
 
-            if musicConnector.isPlaying {
+            if isPlaybackVisuallyActive {
                 MusicSparkleField(song: nowPlaying)
                     .frame(width: proxy.size.width, height: min(proxy.size.height * 0.56, 520))
                     .offset(y: 74)
