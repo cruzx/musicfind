@@ -2875,13 +2875,15 @@ private final class ShakeMotionObserver: ObservableObject {
     private var shakeStrikeCount = 0
     private var lastStrikeDate = Date.distantPast
     private var lastMagnitude = 1.0
+    private var lastAcceleration: CMAcceleration?
 
     func start() {
         guard manager.isAccelerometerAvailable else { return }
         shakeStrikeCount = 0
         lastStrikeDate = .distantPast
         lastMagnitude = 1.0
-        manager.accelerometerUpdateInterval = 1.0 / 30.0
+        lastAcceleration = nil
+        manager.accelerometerUpdateInterval = 1.0 / 45.0
         manager.startAccelerometerUpdates(to: .main) { [weak self] data, _ in
             guard let self, let data else { return }
             self.handleAcceleration(data.acceleration)
@@ -2899,26 +2901,42 @@ private final class ShakeMotionObserver: ObservableObject {
             acceleration.z * acceleration.z
         )
         let impulse = abs(magnitude - lastMagnitude)
+        let directionalImpulse: Double
+        if let previous = lastAcceleration {
+            let dx = acceleration.x - previous.x
+            let dy = acceleration.y - previous.y
+            let dz = acceleration.z - previous.z
+            directionalImpulse = sqrt(dx * dx + dy * dy + dz * dz)
+        } else {
+            directionalImpulse = 0
+        }
+        let horizontalImpulse = max(abs(acceleration.x), abs(acceleration.y))
+        lastAcceleration = acceleration
         lastMagnitude = magnitude
 
         let now = Date()
-        guard now.timeIntervalSince(lastShakeDate) > 1.15 else { return }
+        guard now.timeIntervalSince(lastShakeDate) > 0.86 else { return }
 
-        guard magnitude > 2.35 || impulse > 1.24 else {
-            if now.timeIntervalSince(lastStrikeDate) > 0.28 {
+        let isShakeStrike = magnitude > 2.05 ||
+            impulse > 0.82 ||
+            directionalImpulse > 1.05 ||
+            horizontalImpulse > 1.70
+
+        guard isShakeStrike else {
+            if now.timeIntervalSince(lastStrikeDate) > 0.42 {
                 shakeStrikeCount = 0
             }
             return
         }
 
-        if now.timeIntervalSince(lastStrikeDate) > 0.34 {
+        if now.timeIntervalSince(lastStrikeDate) > 0.46 {
             shakeStrikeCount = 1
         } else {
             shakeStrikeCount += 1
         }
         lastStrikeDate = now
 
-        guard shakeStrikeCount >= 3 else { return }
+        guard shakeStrikeCount >= 2 else { return }
         shakeStrikeCount = 0
         lastShakeDate = now
         shakeCount += 1
