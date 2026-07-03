@@ -199,8 +199,11 @@ struct ContentView: View {
                     .foregroundStyle(.white.opacity(0.68))
                     .lineLimit(1)
                     .position(
-                        x: playerPillFrame.isEmpty ? proxy.size.width / 2 : playerPillFrame.midX,
-                        y: (playerPillFrame.isEmpty ? proxy.size.height - proxy.safeAreaInsets.bottom - 4 : playerPillFrame.maxY) + 27
+                        x: min(max(playerPillFrame.isEmpty ? proxy.size.width / 2 : playerPillFrame.midX, 64), proxy.size.width - 64),
+                        y: min(
+                            (playerPillFrame.isEmpty ? proxy.size.height - proxy.safeAreaInsets.bottom - 40 : playerPillFrame.maxY) + 27,
+                            proxy.size.height - max(proxy.safeAreaInsets.bottom, 8) - 8
+                        )
                     )
                     .allowsHitTesting(false)
                     .transition(.opacity)
@@ -227,6 +230,7 @@ struct ContentView: View {
                 .zIndex(12)
             }
         }
+        .coordinateSpace(name: "contentRoot")
         }
         .task {
             await musicConnector.refreshAppleMusicLibraryIfPossible()
@@ -4421,7 +4425,7 @@ private struct PlayerPill: View {
         .background {
             GeometryReader { proxy in
                 Color.clear
-                    .preference(key: PlayerPillFramePreferenceKey.self, value: proxy.frame(in: .global))
+                    .preference(key: PlayerPillFramePreferenceKey.self, value: proxy.frame(in: .named("contentRoot")))
             }
         }
         .onPreferenceChange(PlayerPillFramePreferenceKey.self) { frame in
