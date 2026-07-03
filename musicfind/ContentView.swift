@@ -410,47 +410,25 @@ struct ContentView: View {
         isHomeAppendingMore = true
         let page = homeLoadMorePage
         homeLoadMorePage += 1
-        let placeholderStartIndex = appendLoadingPlaceholders(count: 12)
 
         Task { @MainActor in
             let additions = await musicConnector.loadMoreDiscoverySongs(page: page)
             guard Task.isCancelled == false else { return }
-            if additions.isEmpty == false {
-                revealLoadedHomeSongs(additions, from: placeholderStartIndex)
-            } else {
-                removeLoadingPlaceholders(from: placeholderStartIndex)
-            }
+            appendLoadedHomeSongs(additions)
         }
     }
 
-    private func appendLoadingPlaceholders(count: Int) -> Int {
-        resetHomeFlipState()
-        registerHomeInteraction()
+    private func appendLoadedHomeSongs(_ additions: [DemoSong]) {
+        guard additions.isEmpty == false else {
+            isHomeLoadingMore = false
+            isHomeAppendingMore = false
+            return
+        }
 
         let current = homeSongs.isEmpty ? songs : homeSongs
-        let newStartIndex = current.count
-        let placeholders = (0..<count).map { offset in
-            DemoSong.placeholder(
-                id: -1_000_000 - newStartIndex - offset,
-                colors: DemoSong.library[(homeLoadMorePage + offset) % DemoSong.library.count].colors
-            )
-        }
-        homeSongs = current + placeholders
-        homePendingSongs = homeSongs
-        homeFlipVariations = makeHomeFlipVariations(count: homeSongs.count)
-        homeFlipProgressByID = Dictionary(
-            uniqueKeysWithValues: homeSongs.indices.map { index in
-                (index, index < newStartIndex ? CGFloat(1) : CGFloat(0))
-            }
-        )
-        isHomeFlipping = true
-        return newStartIndex
-    }
-
-    private func revealLoadedHomeSongs(_ additions: [DemoSong], from startIndex: Int) {
-        let current = Array(homeSongs.prefix(startIndex))
+        let startIndex = current.count
         let targetSongs = current + additions
-        homeSongs = current + Array(homeSongs.dropFirst(startIndex).prefix(additions.count))
+        homeSongs = targetSongs
         homePendingSongs = targetSongs
         homeFlipVariations = makeHomeFlipVariations(count: targetSongs.count)
 
@@ -474,28 +452,20 @@ struct ContentView: View {
                 Task { @MainActor in
                     try? await Task.sleep(for: .milliseconds(max(0, stagger)))
                     guard !Task.isCancelled, isHomeFlipping, homeFlipGeneration == generation else { return }
-                    generator.impactOccurred(intensity: 0.38)
-                    withAnimation(.interactiveSpring(response: 0.46, dampingFraction: 0.78, blendDuration: 0.02)) {
+                    generator.impactOccurred(intensity: 0.28)
+                    withAnimation(.interactiveSpring(response: 0.34, dampingFraction: 0.82, blendDuration: 0.02)) {
                         homeFlipProgressByID[index] = 1
                     }
                 }
             }
 
             let rows = max(1, Int(ceil(Double(additions.count) / 4.0)))
-            try? await Task.sleep(for: .milliseconds(rows * 96 + 760))
+            try? await Task.sleep(for: .milliseconds(rows * 82 + 520))
             guard !Task.isCancelled, homeFlipGeneration == generation else { return }
-            homeSongs = targetSongs
             resetHomeFlipState()
             isHomeLoadingMore = false
             isHomeAppendingMore = false
         }
-    }
-
-    private func removeLoadingPlaceholders(from startIndex: Int) {
-        homeSongs = Array(homeSongs.prefix(startIndex))
-        resetHomeFlipState()
-        isHomeLoadingMore = false
-        isHomeAppendingMore = false
     }
 
     private func reshuffleHomeSongsWithFlip() {
