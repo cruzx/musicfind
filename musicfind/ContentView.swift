@@ -81,7 +81,7 @@ struct ContentView: View {
                                         UIImpactFeedbackGenerator(style: .light).impactOccurred()
                                         registerHomeInteraction()
                                         nowPlaying = slot.song
-                                        Task { await musicConnector.play(slot.song, in: visibleHomeSongs) }
+                                        musicConnector.queuePlayback(for: slot.song, in: visibleHomeSongs)
                                     }
                                 )
                                 .onAppear {
@@ -109,30 +109,32 @@ struct ContentView: View {
             .scaleEffect(activeTab == .settings ? 0.985 : (isPlayerCardVisible ? 0.985 : 1))
             .animation(.smooth(duration: 0.24, extraBounce: 0.0), value: activeTab)
             .animation(.smooth(duration: 0.24, extraBounce: 0.0), value: isPlayerCardVisible)
+            .zIndex(0)
 
             TopGlassFade()
                 .ignoresSafeArea(edges: .top)
                 .allowsHitTesting(false)
                 .blur(radius: settingsBackdropBlur + playerBackdropBlur, opaque: false)
                 .opacity(chromeOpacity)
+                .zIndex(1)
 
             BottomGlassFade()
                 .ignoresSafeArea(edges: .bottom)
                 .allowsHitTesting(false)
                 .blur(radius: settingsBackdropBlur + playerBackdropBlur, opaque: false)
                 .opacity(chromeOpacity)
+                .zIndex(1)
 
             if musicConnector.isPlaying {
-                VStack {
-                    Spacer(minLength: 0)
-                    MusicSparkleField(song: nowPlaying)
-                        .frame(height: min(proxy.size.height * 0.56, 520))
-                        .offset(y: 74)
-                }
+                MusicSparkleField(song: nowPlaying)
+                    .frame(width: proxy.size.width, height: min(proxy.size.height * 0.56, 520))
+                    .offset(y: 74)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                 .ignoresSafeArea(edges: .bottom)
                 .allowsHitTesting(false)
                 .blur(radius: settingsBackdropBlur + playerBackdropBlur, opaque: false)
                 .transition(.opacity.animation(.easeOut(duration: 0.22)))
+                .zIndex(4)
             }
 
             VStack {
@@ -161,12 +163,14 @@ struct ContentView: View {
             .animation(.smooth(duration: 0.24, extraBounce: 0.0), value: activeTab)
             .animation(.smooth(duration: 0.24, extraBounce: 0.0), value: isPlayerCardVisible)
             .animation(.smooth(duration: 0.24, extraBounce: 0.0), value: isLandscape)
+            .zIndex(6)
 
             VStack {
                 Spacer()
                 BottomNavigationBar(
                     nowPlaying: nowPlaying,
                     isPlaying: musicConnector.isPlaying,
+                    isPlaybackLoading: musicConnector.isPlaybackTransitioning,
                     namespace: playerExpansionNamespace,
                     isPlayerCardVisible: isPlayerCardVisible,
                     isDropTargeted: false,
@@ -186,10 +190,29 @@ struct ContentView: View {
             .blur(radius: settingsBackdropBlur + playerBackdropBlur, opaque: false)
             .animation(.smooth(duration: 0.24, extraBounce: 0.0), value: activeTab)
             .animation(.smooth(duration: 0.24, extraBounce: 0.0), value: isPlayerCardVisible)
+            .zIndex(8)
+
+            if musicConnector.showPlaybackLoadingToast {
+                Text("歌曲加载中...")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.68))
+                    .lineLimit(1)
+                    .position(
+                        x: playerPillFrame.isEmpty ? proxy.size.width / 2 : playerPillFrame.midX,
+                        y: min(
+                            proxy.size.height - max(proxy.safeAreaInsets.bottom - 10, 4),
+                            (playerPillFrame.isEmpty ? proxy.size.height - proxy.safeAreaInsets.bottom - 42 : playerPillFrame.maxY) + 28
+                        )
+                    )
+                    .allowsHitTesting(false)
+                    .transition(.opacity)
+                    .zIndex(9)
+            }
 
             if activeTab == .settings {
                 Color.black.opacity(0.48)
                     .ignoresSafeArea()
+                    .zIndex(11)
                     .onTapGesture {
                         withAnimation(.smooth(duration: 0.24, extraBounce: 0.0)) {
                             activeTab = .home
@@ -204,22 +227,6 @@ struct ContentView: View {
                 .padding(.horizontal, 12)
                 .transition(.scale(scale: 0.94).combined(with: .opacity))
                 .zIndex(12)
-            }
-
-            if musicConnector.showPlaybackLoadingToast {
-                Text("歌曲加载中~")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.88))
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 9)
-                    .background(.black.opacity(0.62))
-                    .clipShape(Capsule())
-                    .overlay {
-                        Capsule()
-                            .stroke(.white.opacity(0.10), lineWidth: 1)
-                    }
-                    .transition(.opacity)
-                    .zIndex(20)
             }
         }
         }
@@ -279,7 +286,7 @@ struct ContentView: View {
         guard let song = adjacentPlayableSong(step: step, in: playbackSongs) else { return }
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
         nowPlaying = song
-        Task { await musicConnector.play(song, in: playbackSongs) }
+        musicConnector.queuePlayback(for: song, in: playbackSongs)
     }
 
     private func adjacentPlayableSong(step: Int, in playbackSongs: [DemoSong]) -> DemoSong? {
@@ -1173,6 +1180,7 @@ private final class MusicConnectionManager: ObservableObject {
     @Published var currentSong: DemoSong?
     @Published var playingSongID: Int?
     @Published var isPlaying = false
+    @Published var isPlaybackTransitioning = false
     @Published var showPlaybackLoadingToast = false
     @Published private var fetchedLyricsByKey: [String: String] = [:]
     @Published private var loadingLyricKeys: Set<String> = []
@@ -1189,9 +1197,14 @@ private final class MusicConnectionManager: ObservableObject {
     private var playbackLoadingTask: Task<Void, Never>?
     private var queuedPlaybackTask: Task<Void, Never>?
     private var playbackQueueWarmupTask: Task<Void, Never>?
+    private var playbackPrefetchTask: Task<Void, Never>?
     private var recommendationTask: Task<Void, Never>?
     private var playbackObservers: [NSObjectProtocol] = []
-    private let playbackQueueLimit = 12
+    private let playbackQueueLimit = 5
+    private let playbackPrefetchLimit = 8
+    private let discoveryExtraSongLimit = 96
+    private var nextPlaybackPrefetchPage = 1
+    private var loadedPlaybackPrefetchPages = Set<Int>()
 
     var discoverySongs: [DemoSong] {
         let baseSongs = librarySongs.isEmpty ? DemoSong.library : librarySongs
@@ -1322,7 +1335,8 @@ private final class MusicConnectionManager: ObservableObject {
             idBase: 500_000 + page * 10_000
         )
         guard additions.isEmpty == false else { return [] }
-        discoveryExtraSongs.append(contentsOf: additions)
+        appendCachedDiscoveryExtras(additions)
+        nextPlaybackPrefetchPage = max(nextPlaybackPrefetchPage, page + 1)
         return additions
     }
 
@@ -1515,20 +1529,7 @@ private final class MusicConnectionManager: ObservableObject {
     }
 
     func play(_ song: DemoSong, in queueSongs: [DemoSong]? = nil) async {
-        guard song.isPlayable else {
-            message = "这首是 AI 推荐，暂时没有可播放资源。"
-            return
-        }
-        beginPlaybackLoading()
-        playingSongID = song.id
-        currentSong = song
-        isPlaying = true
-        await Task.yield()
-        let player = MPMusicPlayerController.applicationMusicPlayer
-        setPlaybackQueue(on: player, startingWith: song, in: queueSongs)
-        player.play()
-        endPlaybackLoading()
-        message = "正在播放：\(song.title)"
+        queuePlayback(for: song, in: queueSongs)
     }
 
     func queuePlayback(for song: DemoSong, in queueSongs: [DemoSong]? = nil) {
@@ -1536,6 +1537,7 @@ private final class MusicConnectionManager: ObservableObject {
             message = "这首是 AI 推荐，暂时没有可播放资源。"
             return
         }
+        beginPlaybackLoading()
         queuedPlaybackTask?.cancel()
         if playingSongID != song.id {
             playingSongID = song.id
@@ -1548,13 +1550,11 @@ private final class MusicConnectionManager: ObservableObject {
         }
 
         queuedPlaybackTask = Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(20))
+            try? await Task.sleep(for: .milliseconds(12))
             guard !Task.isCancelled else { return }
             let player = MPMusicPlayerController.applicationMusicPlayer
             setPlaybackQueue(on: player, startingWith: song, in: queueSongs)
-            player.play()
-            endPlaybackLoading()
-            message = "正在播放：\(song.title)"
+            prepareAndStartPlayback(on: player, song: song, queueSongs: queueSongs)
         }
     }
 
@@ -1579,14 +1579,7 @@ private final class MusicConnectionManager: ObservableObject {
             endPlaybackLoading()
             message = "正在播放：\(song.title)"
         } else {
-            playingSongID = song.id
-            currentSong = song
-            isPlaying = true
-            await Task.yield()
-            setPlaybackQueue(on: player, startingWith: song, in: queueSongs)
-            player.play()
-            endPlaybackLoading()
-            message = "正在播放：\(song.title)"
+            queuePlayback(for: song, in: queueSongs)
         }
     }
 
@@ -1736,18 +1729,62 @@ private final class MusicConnectionManager: ObservableObject {
     }
 
     private func setPlaybackQueue(on player: MPMusicPlayerController, startingWith song: DemoSong, in queueSongs: [DemoSong]?) {
-        prepareContinuousQueue(on: player, startingWith: song, in: queueSongs)
+        prepareImmediatePlaybackQueue(on: player, startingWith: song)
+    }
+
+    private func prepareAndStartPlayback(on player: MPMusicPlayerController, song: DemoSong, queueSongs: [DemoSong]?) {
+        player.prepareToPlay { [weak self] error in
+            Task { @MainActor in
+                guard let self, self.playingSongID == song.id else { return }
+                if let error {
+                    self.endPlaybackLoading()
+                    self.message = "加载这首歌有点慢：\(error.localizedDescription)"
+                    return
+                }
+                player.play()
+                self.scheduleContinuousQueueWarmup(startingWith: song, in: queueSongs)
+                self.schedulePlaybackPrefetch(startingWith: song, in: queueSongs)
+                self.endPlaybackLoading()
+                self.message = "正在播放：\(song.title)"
+            }
+        }
+    }
+
+    private func prepareImmediatePlaybackQueue(on player: MPMusicPlayerController, startingWith song: DemoSong) {
+        if let mediaItem = song.mediaItem {
+            player.setQueue(with: MPMediaItemCollection(items: [mediaItem]))
+            player.nowPlayingItem = mediaItem
+        } else if let storeID = song.storeID {
+            player.setQueue(with: [storeID])
+        }
     }
 
     private func scheduleContinuousQueueWarmup(startingWith song: DemoSong, in queueSongs: [DemoSong]?) {
         playbackQueueWarmupTask?.cancel()
-        guard song.mediaItem != nil else { return }
 
         playbackQueueWarmupTask = Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(360))
-            guard !Task.isCancelled, playingSongID == song.id else { return }
+            try? await Task.sleep(for: .milliseconds(1200))
+            guard !Task.isCancelled, playingSongID == song.id, isPlaying else { return }
             let player = MPMusicPlayerController.applicationMusicPlayer
             prepareContinuousQueue(on: player, startingWith: song, in: queueSongs)
+        }
+    }
+
+    private func schedulePlaybackPrefetch(startingWith song: DemoSong, in queueSongs: [DemoSong]?) {
+        playbackPrefetchTask?.cancel()
+        playbackPrefetchTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(780))
+            guard !Task.isCancelled, playingSongID == song.id else { return }
+
+            let upcomingSongs = playbackQueueSongs(startingWith: song, in: queueSongs)
+            PlayerArtworkWarmupCache.shared.preload(songs: Array(upcomingSongs.dropFirst().prefix(playbackPrefetchLimit)))
+
+            guard aiRecommendationsEnabled, discoveryExtraSongs.count < discoveryExtraSongLimit else { return }
+            let page = nextPlaybackPrefetchPage
+            guard loadedPlaybackPrefetchPages.insert(page).inserted else { return }
+            try? await Task.sleep(for: .milliseconds(420))
+            guard !Task.isCancelled, playingSongID == song.id else { return }
+            _ = await loadMoreDiscoverySongs(page: page)
         }
     }
 
@@ -1805,6 +1842,16 @@ private final class MusicConnectionManager: ObservableObject {
         }
     }
 
+    private func appendCachedDiscoveryExtras(_ additions: [DemoSong]) {
+        guard additions.isEmpty == false else { return }
+        let mergedSongs = uniqueDiscoverySongs(from: discoveryExtraSongs + additions)
+        if mergedSongs.count > discoveryExtraSongLimit {
+            discoveryExtraSongs = Array(mergedSongs.suffix(discoveryExtraSongLimit))
+        } else {
+            discoveryExtraSongs = mergedSongs
+        }
+    }
+
     private func isPlayerCurrentlyOn(_ song: DemoSong, player: MPMusicPlayerController) -> Bool {
         if let mediaItem = song.mediaItem, player.nowPlayingItem?.persistentID == mediaItem.persistentID {
             return true
@@ -1838,11 +1885,15 @@ private final class MusicConnectionManager: ObservableObject {
             recommendationTask?.cancel()
             recommendedSongs = []
             discoveryExtraSongs = []
+            nextPlaybackPrefetchPage = 1
+            loadedPlaybackPrefetchPages.removeAll()
             return
         }
         recommendationTask?.cancel()
         recommendedSongs = []
         discoveryExtraSongs = []
+        nextPlaybackPrefetchPage = 1
+        loadedPlaybackPrefetchPages.removeAll()
 
         let seedSongs = Array((spotifySongs + (librarySongs.isEmpty ? DemoSong.library : librarySongs)).prefix(24))
         recommendationTask = Task { @MainActor in
@@ -2115,11 +2166,15 @@ private final class MusicConnectionManager: ObservableObject {
 
     private func beginPlaybackLoading() {
         playbackLoadingTask?.cancel()
+        isPlaybackTransitioning = true
         showPlaybackLoadingToast = false
         playbackLoadingTask = Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(220))
             guard !Task.isCancelled else { return }
             showPlaybackLoadingToast = true
+            try? await Task.sleep(for: .milliseconds(520))
+            guard !Task.isCancelled else { return }
+            isPlaybackTransitioning = false
         }
     }
 
@@ -2129,6 +2184,8 @@ private final class MusicConnectionManager: ObservableObject {
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(120))
             showPlaybackLoadingToast = false
+            try? await Task.sleep(for: .milliseconds(120))
+            isPlaybackTransitioning = false
         }
     }
 
@@ -3059,6 +3116,7 @@ private struct LyricsOverlayView: View {
 private struct BottomNavigationBar: View {
     let nowPlaying: DemoSong
     let isPlaying: Bool
+    let isPlaybackLoading: Bool
     let namespace: Namespace.ID
     let isPlayerCardVisible: Bool
     let isDropTargeted: Bool
@@ -3083,6 +3141,7 @@ private struct BottomNavigationBar: View {
             PlayerPill(
                 song: nowPlaying,
                 isPlaying: isPlaying,
+                isPlaybackLoading: isPlaybackLoading,
                 isActive: true,
                 namespace: namespace,
                 isPlayerCardVisible: isPlayerCardVisible,
@@ -3097,6 +3156,7 @@ private struct BottomNavigationBar: View {
         .scaleEffect(isDropTargeted ? 1.10 : 1)
         .animation(.smooth(duration: 0.18, extraBounce: 0.0), value: isDropTargeted)
         .animation(.bouncy(duration: 0.48, extraBounce: 0.18), value: pillWidth)
+        .animation(.easeInOut(duration: 0.18), value: isPlaybackLoading)
     }
 
     private func measuredTextWidth(_ text: String, size: CGFloat, weight: UIFont.Weight) -> CGFloat {
@@ -3107,6 +3167,7 @@ private struct BottomNavigationBar: View {
 
 private struct MusicSparkleField: View {
     let song: DemoSong
+    @State private var particles: [MusicParticleSpec] = []
 
     private enum ParticleMood {
         case sparkle
@@ -3142,12 +3203,12 @@ private struct MusicSparkleField: View {
         case .sparkle:
             return 0.0
         case .square, .triangle:
-            return 0.78
+            return 0.82
         }
     }
 
     private var sparkleCount: Int {
-        Int(86 + rhythm * 88)
+        Int(90 + rhythm * 70)
     }
 
     private var riseDuration: Double {
@@ -3159,115 +3220,118 @@ private struct MusicSparkleField: View {
     }
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 15.0, paused: false)) { timeline in
+        TimelineView(.animation(minimumInterval: 1.0 / 12.0, paused: false)) { timeline in
             Canvas { context, size in
                 let time = timeline.date.timeIntervalSinceReferenceDate
-                let count = sparkleCount
                 let travelHeight = size.height * 1.02
                 let baseY = size.height + 56
                 let beatProgress = (time * estimatedBPM / 60).truncatingRemainder(dividingBy: 1)
                 let beatPulse = exp(-beatProgress * 7)
                 let offbeatPulse = exp(-abs(beatProgress - 0.5) * 7) * 0.18
                 let pulse = min(0.42, beatPulse * 0.34 + offbeatPulse)
-                let mood = particleMood
-                let shapeShare = moodShapeShare
 
-                for index in 0..<count {
-                    let seed = Double(index + 1)
-                    let delay = random(seed, 0.31) * 1.24
-                    let loopDuration = riseDuration + random(seed, 0.73) * 2.20
-                    let rawProgress = (time / max(loopDuration, 3.4) + delay).truncatingRemainder(dividingBy: 1)
-                    let easedProgress = 1 - pow(1 - rawProgress, 1.18 + pulse * 0.06)
-                    let randomX = size.width * random(seed, 1.13)
-                    let birthScatter = CGFloat((random(seed, 10.7) - 0.5) * size.width * (0.08 + rhythm * 0.12))
-                    let upperScatter = CGFloat((random(seed, 9.51) - 0.5) * size.width * (0.34 + rhythm * 0.22)) * CGFloat(easedProgress)
-                    let drift = CGFloat(sin(time * (0.10 + seed * 0.008) + seed) * (9 + pulse * 4))
-                    let centerX = randomX + birthScatter + upperScatter + drift
-                    let centerY = baseY - CGFloat(easedProgress) * travelHeight
-                    let twinkle = 0.78 + 0.22 * sin(time * (0.45 + seed * 0.025) + seed * 1.31)
-                    let fadeIn = min(rawProgress / 0.28, 1)
-                    let fadeOut = min((1 - rawProgress) / 0.46, 1)
-                    let verticalDensity = pow(max(0, 1 - rawProgress), 1.78)
+                for particle in particles {
+                    let rawProgress = (time / particle.duration + particle.delay).truncatingRemainder(dividingBy: 1)
+                    let easedProgress = rawProgress * (2 - rawProgress)
+                    let vertical = max(0, 1 - rawProgress)
+                    let verticalDensity = vertical * vertical
+                    let fadeIn = min(rawProgress * 4.6, 1)
+                    let fadeOut = min(vertical * 2.2, 1)
                     let alpha = min(
                         1.0,
-                        max(0, fadeIn * fadeOut) * (0.32 + rhythm * 0.20 + pulse * 0.04) * twinkle * (0.30 + verticalDensity * 1.64) * 2.15
+                        fadeIn * fadeOut * particle.opacity * (0.78 + verticalDensity * 1.55 + pulse * 0.10)
                     )
-                    guard alpha > 0.035 else { continue }
-                    let radiusJitter = Double(random(seed, 2.41))
-                    let radiusScale = (1.30 + rhythm * 0.48 + pulse * 0.10) * (0.72 + verticalDensity * 0.34)
-                    let radius = CGFloat(0.38 + radiusJitter * radiusScale)
+                    guard alpha > 0.012 else { continue }
+
+                    let drift = sin(time * particle.driftSpeed + particle.phase) * particle.driftAmount
+                    let centerX = size.width * (particle.x + particle.birthScatter + particle.upperScatter * easedProgress) + drift
+                    let centerY = baseY - easedProgress * travelHeight
                     let point = CGPoint(x: centerX, y: centerY)
-                    drawParticle(
-                        in: &context,
-                        point: point,
-                        radius: radius,
-                        alpha: alpha,
-                        seed: seed,
-                        pulse: pulse,
-                        mood: mood,
-                        shapeShare: shapeShare
-                    )
+                    drawParticle(in: &context, particle: particle, point: point, alpha: alpha, pulse: pulse)
                 }
             }
         }
         .blendMode(.screen)
-        .opacity(0.88)
+        .opacity(0.98)
+        .onAppear {
+            particles = makeParticles()
+        }
+        .onChange(of: song.id) { _, _ in
+            particles = makeParticles()
+        }
     }
 
     private func drawParticle(
         in context: inout GraphicsContext,
+        particle: MusicParticleSpec,
         point: CGPoint,
-        radius: CGFloat,
         alpha: Double,
-        seed: Double,
-        pulse: Double,
-        mood: ParticleMood,
-        shapeShare: CGFloat
+        pulse: Double
     ) {
-        let type = random(seed, 3.17)
-        let tint = particleTint(for: seed)
-        let coreTint = random(seed, 12.4) > 0.68 ? tint : Color.white
-        let useMoodShape = random(seed, 5.53) < shapeShare
-        let corePath = useMoodShape
-            ? particleCorePath(mood: mood, center: point, radius: radius, seed: seed)
-            : Path(ellipseIn: CGRect(x: point.x - radius * 0.50, y: point.y - radius * 0.50, width: radius, height: radius))
+        let radius = particle.radius
+        let corePath = particlePath(style: particle.style, center: point, radius: radius)
 
-        if type < 0.82 {
-            context.opacity = alpha * 1.28
-            context.fill(
-                corePath,
-                with: .color(coreTint.opacity(0.94))
-            )
-        } else if type < 0.97 {
-            context.opacity = alpha * (0.34 + pulse * 0.02)
+        if particle.hasGlow {
+            context.opacity = alpha * (0.28 + pulse * 0.02)
             context.fill(
                 Path(ellipseIn: CGRect(
-                    x: point.x - radius * 1.28,
-                    y: point.y - radius * 1.28,
-                    width: radius * 2.56,
-                    height: radius * 2.56
+                    x: point.x - radius * 1.20,
+                    y: point.y - radius * 1.20,
+                    width: radius * 2.40,
+                    height: radius * 2.40
                 )),
-                with: .color(tint.opacity(0.30))
+                with: .color(particle.tint.opacity(0.30))
             )
+        }
 
-            context.opacity = alpha * 1.18
-            context.fill(
-                useMoodShape
-                    ? particleCorePath(mood: mood, center: point, radius: radius * 0.98, seed: seed)
-                    : Path(ellipseIn: CGRect(x: point.x - radius * 0.48, y: point.y - radius * 0.48, width: radius * 0.96, height: radius * 0.96)),
-                with: .color(coreTint.opacity(0.88))
-            )
-        } else {
-            context.opacity = alpha * (0.68 + pulse * 0.04)
-            context.fill(
-                sparklePath(center: point, radius: radius * 1.65),
-                with: .color(coreTint.opacity(0.74))
-            )
+        context.opacity = alpha * (particle.hasGlow ? 1.02 : 1.18)
+        context.fill(corePath, with: .color(particle.coreTint.opacity(0.92)))
+    }
 
-            context.opacity = alpha * (0.36 + pulse * 0.03)
-            context.fill(
-                sparklePath(center: point, radius: radius * 2.9),
-                with: .color(tint.opacity(0.50))
+    private func makeParticles() -> [MusicParticleSpec] {
+        let mood = particleMood
+        let shapeShare = moodShapeShare
+        let count = sparkleCount
+        let rhythm = rhythm
+        return (0..<count).map { index in
+            let seed = Double(index + 1)
+            let shouldUseMoodShape = random(seed, 5.53) < shapeShare
+            let style: MusicParticleSpec.Style
+            if shouldUseMoodShape {
+                switch mood {
+                case .square:
+                    style = random(seed, 7.91) > 0.52 ? .diamond : .square
+                case .triangle:
+                    style = .triangle
+                case .sparkle:
+                    style = .sparkle
+                }
+            } else if random(seed, 3.17) > 0.965 {
+                style = .sparkle
+            } else {
+                style = .circle
+            }
+
+            let tint = particleTint(for: seed)
+            let coreTint = random(seed, 12.4) > 0.68 ? tint : Color.white
+            let radiusJitter = Double(random(seed, 2.41))
+            let radiusScale = 1.10 + rhythm * 0.42 + Double(random(seed, 16.4)) * 0.58
+
+            return MusicParticleSpec(
+                x: random(seed, 1.13),
+                birthScatter: (random(seed, 10.7) - 0.5) * (0.08 + rhythm * 0.12),
+                upperScatter: (random(seed, 9.51) - 0.5) * (0.32 + rhythm * 0.18),
+                delay: Double(random(seed, 0.31)) * 1.24,
+                duration: max(3.6, riseDuration + Double(random(seed, 0.73)) * 2.10),
+                driftAmount: 5 + random(seed, 4.83) * 10,
+                driftSpeed: 0.08 + Double(random(seed, 6.21)) * 0.18,
+                phase: Double(random(seed, 8.41)) * .pi * 2,
+                radius: CGFloat(0.42 + radiusJitter * radiusScale),
+                opacity: 0.42 + Double(random(seed, 11.19)) * 0.58,
+                tint: tint,
+                coreTint: coreTint,
+                style: style,
+                hasGlow: random(seed, 13.63) > 0.76
             )
         }
     }
@@ -3294,22 +3358,34 @@ private struct MusicSparkleField: View {
         return song.colors[colorIndex]
     }
 
-    private func particleCorePath(mood: ParticleMood, center: CGPoint, radius: CGFloat, seed: Double) -> Path {
-        switch mood {
+    private func random(_ seed: Double, _ salt: Double) -> CGFloat {
+        let value = sin((seed + salt) * 12.9898) * 43758.5453
+        return CGFloat(value - floor(value))
+    }
+
+    private func particlePath(style: MusicParticleSpec.Style, center: CGPoint, radius: CGFloat) -> Path {
+        switch style {
+        case .circle:
+            return Path(ellipseIn: CGRect(
+                x: center.x - radius * 0.50,
+                y: center.y - radius * 0.50,
+                width: radius,
+                height: radius
+            ))
         case .square:
-            let side = radius * 1.22
-            if random(seed, 7.91) > 0.52 {
-                var path = Path()
-                path.move(to: CGPoint(x: center.x, y: center.y - side * 0.62))
-                path.addLine(to: CGPoint(x: center.x + side * 0.62, y: center.y))
-                path.addLine(to: CGPoint(x: center.x, y: center.y + side * 0.62))
-                path.addLine(to: CGPoint(x: center.x - side * 0.62, y: center.y))
-                path.closeSubpath()
-                return path
-            }
+            let side = radius * 1.18
             return Path(CGRect(x: center.x - side * 0.5, y: center.y - side * 0.5, width: side, height: side))
+        case .diamond:
+            let side = radius * 1.20
+            var path = Path()
+            path.move(to: CGPoint(x: center.x, y: center.y - side * 0.62))
+            path.addLine(to: CGPoint(x: center.x + side * 0.62, y: center.y))
+            path.addLine(to: CGPoint(x: center.x, y: center.y + side * 0.62))
+            path.addLine(to: CGPoint(x: center.x - side * 0.62, y: center.y))
+            path.closeSubpath()
+            return path
         case .triangle:
-            let side = radius * 1.52
+            let side = radius * 1.46
             var path = Path()
             path.move(to: CGPoint(x: center.x, y: center.y - side * 0.62))
             path.addLine(to: CGPoint(x: center.x + side * 0.58, y: center.y + side * 0.42))
@@ -3319,11 +3395,6 @@ private struct MusicSparkleField: View {
         case .sparkle:
             return sparklePath(center: center, radius: radius * 1.35)
         }
-    }
-
-    private func random(_ seed: Double, _ salt: Double) -> CGFloat {
-        let value = sin((seed + salt) * 12.9898) * 43758.5453
-        return CGFloat(value - floor(value))
     }
 
     private func sparklePath(center: CGPoint, radius: CGFloat) -> Path {
@@ -3339,6 +3410,31 @@ private struct MusicSparkleField: View {
         path.closeSubpath()
         return path
     }
+}
+
+private struct MusicParticleSpec {
+    enum Style {
+        case circle
+        case square
+        case diamond
+        case triangle
+        case sparkle
+    }
+
+    let x: CGFloat
+    let birthScatter: CGFloat
+    let upperScatter: CGFloat
+    let delay: Double
+    let duration: Double
+    let driftAmount: CGFloat
+    let driftSpeed: Double
+    let phase: Double
+    let radius: CGFloat
+    let opacity: Double
+    let tint: Color
+    let coreTint: Color
+    let style: Style
+    let hasGlow: Bool
 }
 
 private struct CarouselPlayerOverlay: View {
@@ -4124,13 +4220,20 @@ private final class PlayerArtworkWarmupCache {
         guard targets.isEmpty == false else { return }
         targets.forEach { warmingIDs.insert($0.id) }
 
-        Task { @MainActor [weak self] in
+        Task.detached(priority: .utility) { [weak self] in
+            var preparedImages: [(Int, UIImage)] = []
             for song in targets {
                 if let preparedArtwork = await song.artworkImage?.byPreparingForDisplay() {
-                    self?.artworkCache.setObject(preparedArtwork, forKey: NSNumber(value: song.id))
+                    preparedImages.append((song.id, preparedArtwork))
                 }
             }
-            targets.forEach { self?.warmingIDs.remove($0.id) }
+
+            await MainActor.run {
+                preparedImages.forEach { id, image in
+                    self?.artworkCache.setObject(image, forKey: NSNumber(value: id))
+                }
+                targets.forEach { self?.warmingIDs.remove($0.id) }
+            }
         }
     }
 }
@@ -4213,6 +4316,7 @@ private struct TopSettingsButton: View {
 private struct PlayerPill: View {
     let song: DemoSong
     let isPlaying: Bool
+    let isPlaybackLoading: Bool
     let isActive: Bool
     let namespace: Namespace.ID
     let isPlayerCardVisible: Bool
@@ -4256,12 +4360,13 @@ private struct PlayerPill: View {
                 Spacer(minLength: 8)
 
                 Button(action: onTogglePlayback) {
-                    Image(systemName: isPlaying ? "pause.fill" : "play.fill")
-                        .font(.system(size: 23, weight: .bold))
-                        .foregroundStyle(.white)
-                        .frame(width: 34, height: 38)
+                    PlayerPillPlaybackButtonIcon(
+                        isPlaying: isPlaying,
+                        isLoading: isPlaybackLoading
+                    )
                 }
                 .buttonStyle(.plain)
+                .disabled(isPlaybackLoading)
             }
             .padding(.leading, 11)
             .padding(.trailing, 12)
@@ -4482,6 +4587,32 @@ private struct PlayerPillGlassAura: View {
         }
         .padding(-8)
         .allowsHitTesting(false)
+    }
+}
+
+private struct PlayerPillPlaybackButtonIcon: View {
+    let isPlaying: Bool
+    let isLoading: Bool
+
+    var body: some View {
+        ZStack {
+            Image(systemName: isPlaying ? "pause.fill" : "play.fill")
+                .font(.system(size: 23, weight: .bold))
+                .foregroundStyle(.white)
+                .scaleEffect(isLoading ? 0.72 : 1)
+                .opacity(isLoading ? 0 : 1)
+
+            ProgressView()
+                .progressViewStyle(.circular)
+                .tint(.white)
+                .controlSize(.small)
+                .scaleEffect(isLoading ? 0.92 : 0.68)
+                .opacity(isLoading ? 1 : 0)
+        }
+        .frame(width: 34, height: 38)
+        .contentShape(Rectangle())
+        .animation(.easeInOut(duration: 0.16), value: isLoading)
+        .animation(.easeInOut(duration: 0.16), value: isPlaying)
     }
 }
 
