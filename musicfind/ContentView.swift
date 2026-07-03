@@ -194,16 +194,21 @@ struct ContentView: View {
             .zIndex(8)
 
             if musicConnector.showPlaybackLoadingToast {
-                VStack {
-                    Spacer()
-                    Text("歌曲加载中...")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.68))
-                        .lineLimit(1)
-                        .padding(.bottom, 84)
-                }
+                Text("歌曲加载中...")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.68))
+                    .lineLimit(1)
+                    .fixedSize()
+                    .position(
+                        x: proxy.size.width / 2,
+                        y: playbackLoadingLabelY(
+                            in: proxy.size,
+                            bottomSafeArea: proxy.safeAreaInsets.bottom
+                        )
+                    )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .allowsHitTesting(false)
+                    .ignoresSafeArea(edges: .bottom)
                     .transition(.opacity)
                     .zIndex(9)
             }
@@ -279,6 +284,24 @@ struct ContentView: View {
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
         let playbackSongs = songs
         Task { await musicConnector.togglePlayback(for: nowPlaying, in: playbackSongs) }
+    }
+
+    private func playbackLoadingLabelY(in size: CGSize, bottomSafeArea: CGFloat) -> CGFloat {
+        let gap: CGFloat = 20
+        let labelHalfHeight: CGFloat = 8
+        let visibleBottom = size.height + max(bottomSafeArea, 0)
+
+        guard !playerPillFrame.isEmpty else {
+            return visibleBottom - labelHalfHeight - 6
+        }
+
+        let belowBarY = playerPillFrame.maxY + gap + labelHalfHeight
+        if belowBarY + labelHalfHeight <= visibleBottom - 4 {
+            return belowBarY
+        }
+
+        let aboveBarY = playerPillFrame.minY - gap - labelHalfHeight
+        return max(labelHalfHeight + 4, aboveBarY)
     }
 
     private func playAdjacentSong(step: Int) {
