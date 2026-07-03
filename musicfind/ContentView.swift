@@ -194,22 +194,15 @@ struct ContentView: View {
             .zIndex(8)
 
             if musicConnector.showPlaybackLoadingToast {
-                Text("歌曲加载中...")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.68))
-                    .lineLimit(1)
-                    .position(
-                        x: min(max(playerPillFrame.isEmpty ? proxy.size.width / 2 : playerPillFrame.midX, 64), proxy.size.width - 64),
-                        y: max(
-                            proxy.safeAreaInsets.top + 92,
-                            playerPillFrame.isEmpty
-                                ? proxy.size.height - proxy.safeAreaInsets.bottom - 6
-                                : min(
-                                    playerPillFrame.minY + 178,
-                                    proxy.size.height - max(proxy.safeAreaInsets.bottom, 8) - 8
-                                )
-                        )
-                    )
+                VStack {
+                    Spacer()
+                    Text("歌曲加载中...")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.68))
+                        .lineLimit(1)
+                        .padding(.bottom, 84)
+                }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .allowsHitTesting(false)
                     .transition(.opacity)
                     .zIndex(9)
