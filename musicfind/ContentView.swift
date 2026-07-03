@@ -200,9 +200,11 @@ struct ContentView: View {
                     .lineLimit(1)
                     .position(
                         x: min(max(playerPillFrame.isEmpty ? proxy.size.width / 2 : playerPillFrame.midX, 64), proxy.size.width - 64),
-                        y: min(
-                            (playerPillFrame.isEmpty ? proxy.size.height - proxy.safeAreaInsets.bottom - 40 : playerPillFrame.maxY) + 27,
-                            proxy.size.height - max(proxy.safeAreaInsets.bottom, 8) - 8
+                        y: max(
+                            proxy.safeAreaInsets.top + 92,
+                            playerPillFrame.isEmpty
+                                ? proxy.size.height - proxy.safeAreaInsets.bottom - 106
+                                : playerPillFrame.minY - 22
                         )
                     )
                     .allowsHitTesting(false)
