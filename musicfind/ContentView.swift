@@ -167,47 +167,42 @@ struct ContentView: View {
 
             VStack {
                 Spacer()
-                BottomNavigationBar(
-                    nowPlaying: nowPlaying,
-                    isPlaying: musicConnector.isPlaying,
-                    isPlaybackLoading: musicConnector.isPlaybackTransitioning,
-                    namespace: playerExpansionNamespace,
-                    isPlayerCardVisible: isPlayerCardVisible,
-                    isDropTargeted: false,
-                    playerPillFrame: $playerPillFrame,
-                    onPlayerTap: toggleCurrentPlayback,
-                    onTogglePlayback: toggleCurrentPlayback,
-                    onPrevious: {
-                        playAdjacentSong(step: -1)
-                    },
-                    onNext: {
-                        playAdjacentSong(step: 1)
-                    }
-                )
+                VStack(spacing: 0) {
+                    BottomNavigationBar(
+                        nowPlaying: nowPlaying,
+                        isPlaying: musicConnector.isPlaying,
+                        isPlaybackLoading: musicConnector.isPlaybackTransitioning,
+                        namespace: playerExpansionNamespace,
+                        isPlayerCardVisible: isPlayerCardVisible,
+                        isDropTargeted: false,
+                        playerPillFrame: $playerPillFrame,
+                        onPlayerTap: toggleCurrentPlayback,
+                        onTogglePlayback: toggleCurrentPlayback,
+                        onPrevious: {
+                            playAdjacentSong(step: -1)
+                        },
+                        onNext: {
+                            playAdjacentSong(step: 1)
+                        }
+                    )
                     .padding(.horizontal, 8)
-                    .padding(.bottom, 12)
+
+                    if musicConnector.showPlaybackLoadingToast {
+                        Text("歌曲加载中...")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.68))
+                            .lineLimit(1)
+                            .padding(.top, 20)
+                            .transition(.opacity)
+                    }
+                }
+                .padding(.bottom, 12)
             }
             .blur(radius: settingsBackdropBlur + playerBackdropBlur, opaque: false)
             .animation(.smooth(duration: 0.24, extraBounce: 0.0), value: activeTab)
             .animation(.smooth(duration: 0.24, extraBounce: 0.0), value: isPlayerCardVisible)
+            .animation(.easeInOut(duration: 0.18), value: musicConnector.showPlaybackLoadingToast)
             .zIndex(8)
-
-            if musicConnector.showPlaybackLoadingToast {
-                Text("歌曲加载中...")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.68))
-                    .lineLimit(1)
-                    .position(
-                        x: playerPillFrame.isEmpty ? proxy.size.width / 2 : playerPillFrame.midX,
-                        y: min(
-                            proxy.size.height - max(proxy.safeAreaInsets.bottom - 10, 4),
-                            (playerPillFrame.isEmpty ? proxy.size.height - proxy.safeAreaInsets.bottom - 42 : playerPillFrame.maxY) + 28
-                        )
-                    )
-                    .allowsHitTesting(false)
-                    .transition(.opacity)
-                    .zIndex(9)
-            }
 
             if activeTab == .settings {
                 Color.black.opacity(0.48)
