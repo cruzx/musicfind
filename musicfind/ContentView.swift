@@ -12,6 +12,7 @@ import Combine
 import MediaPlayer
 import AuthenticationServices
 import CryptoKit
+import Network
 
 struct ContentView: View {
     @State private var activeTab: AppTab = .home
@@ -41,7 +42,6 @@ struct ContentView: View {
     @Namespace private var playerExpansionNamespace
 
     private let spacing: CGFloat = 8
-    private let columns = 0..<4
     private var songs: [DemoSong] {
         musicConnector.discoverySongs.isEmpty ? DemoSong.library : musicConnector.discoverySongs
     }
@@ -56,15 +56,20 @@ struct ContentView: View {
     }
 
     var body: some View {
-        ZStack {
+        GeometryReader { proxy in
+            let isLandscape = proxy.size.width > proxy.size.height
+            let homeColumnCount = isLandscape ? 5 : 4
+            let chromeOpacity = isLandscape ? 0.0 : 1.0
+
+            ZStack {
             Color(red: 0.0, green: 0.027, blue: 0.098)
                 .ignoresSafeArea()
 
             ScrollView(showsIndicators: false) {
                 HStack(alignment: .top, spacing: spacing) {
-                    ForEach(Array(columns), id: \.self) { column in
+                    ForEach(Array(0..<homeColumnCount), id: \.self) { column in
                         LazyVStack(spacing: spacing) {
-                            ForEach(songSlotsForColumn(column)) { slot in
+                            ForEach(songSlotsForColumn(column, columnCount: homeColumnCount)) { slot in
                                 HomeInteractiveSongSquare(
                                     frontSong: visibleHomeSongs[slot.id],
                                     backSong: homePendingSongs.indices.contains(slot.id) ? homePendingSongs[slot.id] : visibleHomeSongs[slot.id],
@@ -85,14 +90,15 @@ struct ContentView: View {
                             }
                         }
                         .frame(maxWidth: .infinity)
-                        .padding(.top, topOffset(for: column))
+                        .padding(.top, isLandscape ? 0 : topOffset(for: column))
                         .offset(y: homeDriftOffset(for: column))
                     }
                 }
-                .padding(.horizontal, spacing)
-                .padding(.top, spacing)
-                .padding(.bottom, 92)
+                .padding(.horizontal, isLandscape ? 0 : spacing)
+                .padding(.top, isLandscape ? 0 : spacing)
+                .padding(.bottom, isLandscape ? spacing : 92)
             }
+            .ignoresSafeArea(edges: isLandscape ? .all : [])
             .simultaneousGesture(
                 DragGesture(minimumDistance: 1)
                     .onChanged { _ in
@@ -108,14 +114,29 @@ struct ContentView: View {
                 .ignoresSafeArea(edges: .top)
                 .allowsHitTesting(false)
                 .blur(radius: settingsBackdropBlur + playerBackdropBlur, opaque: false)
+                .opacity(chromeOpacity)
 
             BottomGlassFade()
                 .ignoresSafeArea(edges: .bottom)
                 .allowsHitTesting(false)
                 .blur(radius: settingsBackdropBlur + playerBackdropBlur, opaque: false)
+                .opacity(chromeOpacity)
+
+            if musicConnector.isPlaying {
+                VStack {
+                    Spacer(minLength: 0)
+                    MusicSparkleField(song: nowPlaying)
+                        .frame(height: min(proxy.size.height * 0.56, 520))
+                        .offset(y: 74)
+                }
+                .ignoresSafeArea(edges: .bottom)
+                .allowsHitTesting(false)
+                .blur(radius: settingsBackdropBlur + playerBackdropBlur, opaque: false)
+                .transition(.opacity.animation(.easeOut(duration: 0.22)))
+            }
 
             VStack {
-                HStack {
+                HStack(alignment: .top) {
                     if musicConnector.isPlaying {
                         HeaderNowPlayingBadge(song: nowPlaying)
                     } else {
@@ -126,17 +147,20 @@ struct ContentView: View {
                         UIImpactFeedbackGenerator(style: .light).impactOccurred()
                         activeTab = .settings
                     }
+                    .opacity(chromeOpacity)
+                    .allowsHitTesting(!isLandscape)
                 }
                 .padding(.leading, 20)
                 .padding(.trailing, 14)
                 .padding(.top, 12)
-                .offset(y: 0)
+                .offset(y: 10)
 
                 Spacer()
             }
             .blur(radius: settingsBackdropBlur + playerBackdropBlur, opaque: false)
             .animation(.smooth(duration: 0.24, extraBounce: 0.0), value: activeTab)
             .animation(.smooth(duration: 0.24, extraBounce: 0.0), value: isPlayerCardVisible)
+            .animation(.smooth(duration: 0.24, extraBounce: 0.0), value: isLandscape)
 
             VStack {
                 Spacer()
@@ -147,10 +171,13 @@ struct ContentView: View {
                     isPlayerCardVisible: isPlayerCardVisible,
                     isDropTargeted: false,
                     playerPillFrame: $playerPillFrame,
-                    onPlayerTap: showPlayerCard,
-                    onTogglePlayback: {
-                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                        Task { await musicConnector.togglePlayback(for: nowPlaying, in: songs) }
+                    onPlayerTap: toggleCurrentPlayback,
+                    onTogglePlayback: toggleCurrentPlayback,
+                    onPrevious: {
+                        playAdjacentSong(step: -1)
+                    },
+                    onNext: {
+                        playAdjacentSong(step: 1)
                     }
                 )
                     .padding(.horizontal, 8)
@@ -179,29 +206,6 @@ struct ContentView: View {
                 .zIndex(12)
             }
 
-            if isPlayerCardVisible {
-                Color.black.opacity(isPlayerCardContentVisible ? 0.46 : 0.0)
-                    .ignoresSafeArea()
-                    .animation(.easeOut(duration: 0.18), value: isPlayerCardContentVisible)
-
-                LyricsOverlayView(
-                    song: nowPlaying,
-                    lyricLines: musicConnector.lyricLines(for: nowPlaying),
-                    isLyricsLoading: musicConnector.isLoadingLyrics(for: nowPlaying),
-                    isPlaying: musicConnector.isPlaying && musicConnector.playingSongID == nowPlaying.id,
-                    isContentVisible: isPlayerCardContentVisible,
-                    onClose: hidePlayerCard,
-                    onTogglePlayback: {
-                        Task { await musicConnector.togglePlayback(for: nowPlaying, in: songs) }
-                    }
-                )
-                .offset(y: isPlayerCardDismissing ? 120 : 0)
-                .opacity(isPlayerCardDismissing ? 0 : 1)
-                .animation(.smooth(duration: 0.22, extraBounce: 0.0), value: isPlayerCardDismissing)
-                .ignoresSafeArea()
-                .transition(.opacity)
-            }
-
             if musicConnector.showPlaybackLoadingToast {
                 Text("歌曲加载中~")
                     .font(.system(size: 13, weight: .semibold))
@@ -217,6 +221,7 @@ struct ContentView: View {
                     .transition(.opacity)
                     .zIndex(20)
             }
+        }
         }
         .task {
             await musicConnector.refreshAppleMusicLibraryIfPossible()
@@ -263,6 +268,34 @@ struct ContentView: View {
         }
     }
 
+    private func toggleCurrentPlayback() {
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        let playbackSongs = songs
+        Task { await musicConnector.togglePlayback(for: nowPlaying, in: playbackSongs) }
+    }
+
+    private func playAdjacentSong(step: Int) {
+        let playbackSongs = songs
+        guard let song = adjacentPlayableSong(step: step, in: playbackSongs) else { return }
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        nowPlaying = song
+        Task { await musicConnector.play(song, in: playbackSongs) }
+    }
+
+    private func adjacentPlayableSong(step: Int, in playbackSongs: [DemoSong]) -> DemoSong? {
+        guard playbackSongs.isEmpty == false, step != 0 else { return nil }
+        let startIndex = playbackSongs.firstIndex(where: { $0.id == nowPlaying.id }) ?? 0
+        for distance in 1...playbackSongs.count {
+            let rawIndex = startIndex + step * distance
+            let index = (rawIndex % playbackSongs.count + playbackSongs.count) % playbackSongs.count
+            let candidate = playbackSongs[index]
+            if candidate.id != nowPlaying.id, candidate.isPlayable {
+                return candidate
+            }
+        }
+        return nil
+    }
+
     private func showPlayerCard() {
         guard !isPlayerCardVisible else { return }
         stopHomeDrift()
@@ -296,18 +329,18 @@ struct ContentView: View {
         }
     }
 
-    private func songsForColumn(_ column: Int) -> [DemoSong] {
+    private func songsForColumn(_ column: Int, columnCount: Int = 4) -> [DemoSong] {
         visibleHomeSongs.enumerated().compactMap { index, song in
-            index % 4 == column ? song : nil
+            index % columnCount == column ? song : nil
         }
     }
 
-    private func songSlotsForColumn(_ column: Int) -> [HomeSongSlot] {
+    private func songSlotsForColumn(_ column: Int, columnCount: Int = 4) -> [HomeSongSlot] {
         visibleHomeSongs.indices.compactMap { index in
-            guard index % 4 == column else { return nil }
+            guard index % columnCount == column else { return nil }
             return HomeSongSlot(
                 id: index,
-                row: index / 4,
+                row: index / columnCount,
                 column: column,
                 song: displayedHomeSong(at: index)
             )
@@ -596,7 +629,7 @@ struct ContentView: View {
 
     private func homeDriftOffset(for column: Int) -> CGFloat {
         let distance: CGFloat = 32 * homeDriftAmount
-        return (column == 0 || column == 2) ? -distance : distance
+        return column.isMultiple(of: 2) ? -distance : distance
     }
 
     private var isHomeSurfaceVisible: Bool {
@@ -724,7 +757,7 @@ private struct GreetingBadge: View {
             let phase = timeline.date.timeIntervalSinceReferenceDate
             let float = sin(phase * 1.6)
 
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
+            HStack(alignment: .top, spacing: 8) {
                 Text(mood.emoji)
                     .font(.system(size: 27, weight: .bold))
                     .scaleEffect(1 + float * 0.035)
@@ -770,11 +803,15 @@ private struct ProfilePage: View {
     var body: some View {
         GeometryReader { proxy in
             VStack(spacing: 0) {
-                BadgePhysicsPanel()
-                    .frame(height: proxy.size.height * 0.34)
+                BadgePhysicsPanel(songs: connector.discoverySongs)
+                    .frame(height: proxy.size.height * 0.42)
                     .padding(.top, proxy.safeAreaInsets.top + 18)
+                    .offset(y: 10)
+                    .padding(.bottom, 0)
+                    .zIndex(0)
+                    .allowsHitTesting(false)
 
-                VStack(spacing: 14) {
+                SettingsContentStack(connector: connector) {
                     MusicConnectButton(
                         title: "连接 Spotify",
                         subtitle: connector.spotifyStatusText,
@@ -802,6 +839,8 @@ private struct ProfilePage: View {
                         }
                     }
 
+                    SourceSettingsPanel(connector: connector)
+
                     if let message = connector.message {
                         Text(message)
                             .font(.system(size: 13, weight: .medium))
@@ -810,6 +849,7 @@ private struct ProfilePage: View {
                             .padding(.top, 4)
                     }
                 }
+                .zIndex(1)
                 .padding(.horizontal, 18)
                 .padding(.top, 28)
 
@@ -826,7 +866,7 @@ private struct SettingsModalView: View {
 
     var body: some View {
         GeometryReader { proxy in
-            let modalHeight = min(proxy.size.height * 0.72, 620)
+            let modalHeight = min(proxy.size.height * 0.86, 760)
 
             VStack(spacing: 0) {
                 HStack {
@@ -843,11 +883,15 @@ private struct SettingsModalView: View {
                 .padding(.top, 14)
                 .padding(.horizontal, 14)
 
-                BadgePhysicsPanel()
-                    .frame(height: modalHeight * 0.34)
+                BadgePhysicsPanel(songs: connector.discoverySongs)
+                    .frame(height: modalHeight * 0.33)
                     .padding(.horizontal, 10)
+                    .offset(y: 14)
+                    .padding(.bottom, -2)
+                    .zIndex(0)
+                    .allowsHitTesting(false)
 
-                VStack(spacing: 14) {
+                SettingsContentStack(connector: connector) {
                     MusicConnectButton(
                         title: "连接 Spotify",
                         subtitle: connector.spotifyStatusText,
@@ -873,6 +917,8 @@ private struct SettingsModalView: View {
                         }
                     }
 
+                    SourceSettingsPanel(connector: connector)
+
                     if let message = connector.message {
                         Text(message)
                             .font(.system(size: 13, weight: .medium))
@@ -881,8 +927,9 @@ private struct SettingsModalView: View {
                             .padding(.top, 2)
                     }
                 }
+                .zIndex(1)
                 .padding(.horizontal, 18)
-                .padding(.top, 18)
+                .padding(.top, 4)
 
                 Spacer(minLength: 18)
             }
@@ -951,7 +998,164 @@ private struct MusicConnectButton: View {
         }
         .buttonStyle(.plain)
         .disabled(isLoading)
-        .liquidGlassSurface(cornerRadius: 24, isInteractive: true)
+    }
+}
+
+private struct SettingsContentStack<Content: View>: View {
+    @ObservedObject var connector: MusicConnectionManager
+    @ViewBuilder let content: Content
+    @State private var lastHapticOffset: CGFloat = 0
+    @State private var lastDragHapticTranslation: CGFloat = 0
+    private let hapticStep: CGFloat = 10
+
+    var body: some View {
+        ScrollView(showsIndicators: false) {
+            GeometryReader { proxy in
+                Color.clear
+                    .preference(
+                        key: SettingsScrollOffsetPreferenceKey.self,
+                        value: proxy.frame(in: .named("settingsContentScroll")).minY
+                    )
+            }
+            .frame(height: 0)
+
+            VStack(spacing: 12) {
+                content
+            }
+            .padding(.top, 2)
+            .padding(.bottom, 26)
+        }
+        .coordinateSpace(name: "settingsContentScroll")
+        .scrollBounceBehavior(.basedOnSize)
+        .onPreferenceChange(SettingsScrollOffsetPreferenceKey.self) { offset in
+            guard abs(offset - lastHapticOffset) >= hapticStep else { return }
+            lastHapticOffset = offset
+            UIImpactFeedbackGenerator(style: .rigid).impactOccurred(intensity: 0.70)
+        }
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 3)
+                .onChanged { value in
+                    guard abs(value.translation.height - lastDragHapticTranslation) >= hapticStep else { return }
+                    lastDragHapticTranslation = value.translation.height
+                    UIImpactFeedbackGenerator(style: .rigid).impactOccurred(intensity: 0.58)
+                }
+                .onEnded { _ in
+                    lastDragHapticTranslation = 0
+                }
+        )
+    }
+}
+
+private struct SettingsScrollOffsetPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
+private struct SourceSettingsPanel: View {
+    @ObservedObject var connector: MusicConnectionManager
+
+    var body: some View {
+        VStack(spacing: 10) {
+            playlistMenu(
+                title: "Apple Music",
+                systemName: "music.note.list",
+                selection: connector.selectedApplePlaylistID,
+                options: connector.applePlaylistOptions
+            ) { optionID in
+                connector.selectApplePlaylist(optionID)
+            }
+
+            playlistMenu(
+                title: "Spotify",
+                systemName: "music.note",
+                selection: connector.selectedSpotifyPlaylistID,
+                options: connector.spotifyPlaylistOptions
+            ) { optionID in
+                Task { await connector.selectSpotifyPlaylist(optionID) }
+            }
+
+            Toggle(isOn: Binding(
+                get: { connector.aiRecommendationsEnabled },
+                set: { connector.setAIRecommendationsEnabled($0) }
+            )) {
+                Label("AI 歌曲推荐", systemImage: "sparkles")
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundStyle(.white.opacity(0.86))
+            }
+            .toggleStyle(SwitchToggleStyle(tint: Color(red: 1.0, green: 0.18, blue: 0.35)))
+            .padding(.horizontal, 14)
+            .frame(height: 48)
+            .background(.black.opacity(0.48))
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        }
+    }
+
+    private func playlistMenu(
+        title: String,
+        systemName: String,
+        selection: String,
+        options: [MusicPlaylistOption],
+        onSelect: @escaping (String) -> Void
+    ) -> some View {
+        Menu {
+            ForEach(options) { option in
+                Button {
+                    onSelect(option.id)
+                } label: {
+                    Label(option.title, systemImage: option.id == selection ? "checkmark" : "music.note")
+                }
+            }
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: systemName)
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundStyle(.white.opacity(0.82))
+                    .frame(width: 28, height: 28)
+                    .background(.white.opacity(0.08))
+                    .clipShape(Circle())
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(.white.opacity(0.68))
+
+                    Text(options.first(where: { $0.id == selection })?.displayTitle ?? "全部歌单")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                }
+
+                Spacer()
+
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(.white.opacity(0.42))
+            }
+            .padding(.horizontal, 14)
+            .frame(height: 52)
+            .background(.black.opacity(0.48))
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct MusicPlaylistOption: Identifiable, Hashable {
+    static let allID = "all"
+
+    let id: String
+    let title: String
+    let count: Int
+
+    static func all(title: String, count: Int) -> MusicPlaylistOption {
+        MusicPlaylistOption(id: allID, title: title, count: count)
+    }
+
+    var displayTitle: String {
+        count > 0 ? "\(title) · \(count) 首" : title
     }
 }
 
@@ -960,6 +1164,9 @@ private final class MusicConnectionManager: ObservableObject {
     @Published var isConnectingAppleMusic = false
     @Published var isConnectingSpotify = false
     @Published var librarySongs: [DemoSong] = []
+    @Published var applePlaylists: [MusicPlaylistOption] = []
+    @Published var spotifySongs: [DemoSong] = []
+    @Published var spotifyPlaylists: [MusicPlaylistOption] = []
     @Published var recommendedSongs: [DemoSong] = []
     @Published var discoveryExtraSongs: [DemoSong] = []
     @Published var message: String?
@@ -974,6 +1181,9 @@ private final class MusicConnectionManager: ObservableObject {
     @AppStorage("spotifyAccessToken") private var spotifyAccessToken = ""
     @AppStorage("spotifyRefreshToken") private var spotifyRefreshToken = ""
     @AppStorage("spotifyTokenExpiresAt") private var spotifyTokenExpiresAt = 0.0
+    @AppStorage("selectedApplePlaylistID") var selectedApplePlaylistID = MusicPlaylistOption.allID
+    @AppStorage("selectedSpotifyPlaylistID") var selectedSpotifyPlaylistID = MusicPlaylistOption.allID
+    @AppStorage("aiRecommendationsEnabled") var aiRecommendationsEnabled = true
 
     private let spotifyAuthenticator = SpotifyPKCEAuthenticator()
     private var playbackLoadingTask: Task<Void, Never>?
@@ -981,11 +1191,22 @@ private final class MusicConnectionManager: ObservableObject {
     private var playbackQueueWarmupTask: Task<Void, Never>?
     private var recommendationTask: Task<Void, Never>?
     private var playbackObservers: [NSObjectProtocol] = []
-    private let playbackQueueLimit = 6
+    private let playbackQueueLimit = 12
 
     var discoverySongs: [DemoSong] {
         let baseSongs = librarySongs.isEmpty ? DemoSong.library : librarySongs
-        return interleavedDiscoverySongs(librarySongs: baseSongs, recommendedSongs: recommendedSongs) + discoveryExtraSongs
+        let recommendationSongs = aiRecommendationsEnabled ? recommendedSongs : []
+        return uniqueDiscoverySongs(
+            from: spotifySongs + interleavedDiscoverySongs(librarySongs: baseSongs, recommendedSongs: recommendationSongs) + discoveryExtraSongs
+        )
+    }
+
+    var applePlaylistOptions: [MusicPlaylistOption] {
+        [.all(title: "全部 Apple Music 歌单", count: applePlaylists.reduce(0) { $0 + $1.count })] + applePlaylists
+    }
+
+    var spotifyPlaylistOptions: [MusicPlaylistOption] {
+        [.all(title: "全部 Spotify 歌单 + 已收藏", count: spotifyPlaylists.reduce(0) { $0 + $1.count })] + spotifyPlaylists
     }
 
     var appleMusicStatusText: String {
@@ -997,7 +1218,7 @@ private final class MusicConnectionManager: ObservableObject {
     }
 
     var spotifyStatusText: String {
-        spotifyAccessToken.isEmpty ? "通过 Spotify 登录授权" : "已连接"
+        spotifyAccessToken.isEmpty ? "回调: \(SpotifyAuthConfig.redirectURI)" : "已连接"
     }
 
     func connectAppleMusic() async {
@@ -1033,6 +1254,7 @@ private final class MusicConnectionManager: ObservableObject {
         } else {
             refreshRecommendations()
         }
+        await refreshSpotifySongsIfPossible()
         syncPlaybackState()
     }
 
@@ -1047,6 +1269,7 @@ private final class MusicConnectionManager: ObservableObject {
     func loadAppleMusicLibrary() {
         MPMediaLibrary.default().beginGeneratingLibraryChangeNotifications()
 
+        applePlaylists = appleMusicPlaylists()
         let items = mediaItemsFromLibrary()
         let palettes = DemoSong.library.map(\.colors)
         librarySongs = items.prefix(80).enumerated().map { index, item in
@@ -1073,6 +1296,22 @@ private final class MusicConnectionManager: ObservableObject {
         syncPlaybackState()
     }
 
+    func selectApplePlaylist(_ optionID: String) {
+        selectedApplePlaylistID = optionID
+        loadAppleMusicLibrary()
+    }
+
+    func setAIRecommendationsEnabled(_ isEnabled: Bool) {
+        aiRecommendationsEnabled = isEnabled
+        if isEnabled {
+            refreshRecommendations()
+        } else {
+            recommendationTask?.cancel()
+            recommendedSongs = []
+            discoveryExtraSongs = []
+        }
+    }
+
     func loadMoreDiscoverySongs(page: Int) async -> [DemoSong] {
         let queries = moreDiscoveryQueries(page: page)
         let existingSongs = librarySongs + recommendedSongs + discoveryExtraSongs
@@ -1087,13 +1326,87 @@ private final class MusicConnectionManager: ObservableObject {
         return additions
     }
 
+    func refreshSpotifySongsIfPossible(showMessage: Bool = false) async {
+        guard spotifyAccessToken.isEmpty == false else { return }
+
+        do {
+            if spotifyTokenExpiresAt > 0,
+               spotifyTokenExpiresAt - Date().timeIntervalSince1970 < 120,
+               spotifyRefreshToken.isEmpty == false {
+                let token = try await spotifyAuthenticator.refreshAccessToken(refreshToken: spotifyRefreshToken)
+                spotifyAccessToken = token.accessToken
+                spotifyRefreshToken = token.refreshToken ?? spotifyRefreshToken
+                spotifyTokenExpiresAt = Date().addingTimeInterval(TimeInterval(token.expiresIn)).timeIntervalSince1970
+            }
+
+            spotifyPlaylists = try await SpotifyWebAPIClient.playlistOptions(accessToken: spotifyAccessToken, limit: 30)
+            let drafts = try await SpotifyWebAPIClient.discoverySongDrafts(
+                accessToken: spotifyAccessToken,
+                maxCount: 60,
+                playlistID: selectedSpotifyPlaylistID
+            )
+            spotifySongs = spotifySongs(from: drafts, artworkByID: [:])
+            hydrateSpotifyArtwork(for: drafts)
+            if aiRecommendationsEnabled {
+                refreshRecommendations()
+            }
+            if showMessage {
+                message = drafts.isEmpty ? "Spotify 已连接，但没有读到已收藏歌曲或歌单歌曲。" : "已导入 \(drafts.count) 首 Spotify 歌曲到首页"
+            }
+        } catch {
+            if showMessage {
+                message = "Spotify 已连接，但暂时没拉到歌单：\(error.localizedDescription)"
+            }
+        }
+    }
+
+    func selectSpotifyPlaylist(_ optionID: String) async {
+        selectedSpotifyPlaylistID = optionID
+        await refreshSpotifySongsIfPossible(showMessage: true)
+    }
+
+    private func spotifySongs(from drafts: [SpotifySongDraft], artworkByID: [String: UIImage]) -> [DemoSong] {
+        let palettes = DemoSong.library.map(\.colors)
+        return drafts.enumerated().map { index, draft in
+            let palette = palettes[(index + draft.title.count) % palettes.count]
+            let artworkImage = artworkByID[draft.id]
+            let magicColor = artworkImage?.magicAverageColor ?? UIColor(songPalette: palette)
+            return DemoSong(
+                id: 700_000 + index,
+                title: draft.title,
+                artist: draft.artist,
+                colors: palette,
+                artworkImage: artworkImage,
+                backdropImage: artworkImage?.playerBackdropImage,
+                magicColor: Color(uiColor: magicColor),
+                source: .spotify
+            )
+        }
+    }
+
+    private func hydrateSpotifyArtwork(for drafts: [SpotifySongDraft]) {
+        Task { @MainActor in
+            let imageDrafts = Array(drafts.prefix(24))
+            var artworkByID: [String: UIImage] = [:]
+            for draft in imageDrafts {
+                guard let image = await ITunesSearchClient.artworkImage(from: draft.artworkURL) else { continue }
+                artworkByID[draft.id] = image
+                if artworkByID.count.isMultiple(of: 6) || artworkByID.count == imageDrafts.count {
+                    spotifySongs = spotifySongs(from: drafts, artworkByID: artworkByID)
+                }
+            }
+        }
+    }
+
     private func mediaItemsFromLibrary() -> [MPMediaItem] {
-        let queryItems = [
-            MPMediaQuery.songs().items ?? [],
-            MPMediaQuery.albums().items ?? [],
-            MPMediaQuery.artists().items ?? [],
-            MPMediaQuery.playlists().collections?.flatMap(\.items) ?? []
-        ].flatMap { $0 }
+        let queryItems: [MPMediaItem]
+        if selectedApplePlaylistID == MusicPlaylistOption.allID {
+            queryItems = MPMediaQuery.playlists().collections?.flatMap(\.items) ?? MPMediaQuery.songs().items ?? []
+        } else {
+            queryItems = appleMusicPlaylistCollections()
+                .first(where: { playlistID(for: $0) == selectedApplePlaylistID })?
+                .items ?? []
+        }
 
         var seenIDs = Set<MPMediaEntityPersistentID>()
         var seenSongs = Set<String>()
@@ -1108,9 +1421,53 @@ private final class MusicConnectionManager: ObservableObject {
         }
     }
 
+    private func appleMusicPlaylists() -> [MusicPlaylistOption] {
+        appleMusicPlaylistCollections().compactMap { collection in
+            let id = playlistID(for: collection)
+            guard id.isEmpty == false else { return nil }
+            let name = (collection as? MPMediaPlaylist)?.name
+                ?? collection.value(forProperty: MPMediaPlaylistPropertyName) as? String
+                ?? "Apple Music 歌单"
+            return MusicPlaylistOption(id: id, title: name, count: collection.items.count)
+        }
+    }
+
+    private func appleMusicPlaylistCollections() -> [MPMediaItemCollection] {
+        MPMediaQuery.playlists().collections ?? []
+    }
+
+    private func playlistID(for collection: MPMediaItemCollection) -> String {
+        if let playlist = collection as? MPMediaPlaylist {
+            return "\(playlist.persistentID)"
+        }
+        if let id = collection.value(forProperty: MPMediaPlaylistPropertyPersistentID) as? NSNumber {
+            return id.stringValue
+        }
+        return ""
+    }
+
     private func normalizedSongKey(title: String, artist: String) -> String {
-        "\(title)|\(artist)"
+        "\(normalizedTitleForRecommendation(title))|\(normalizedArtistForRecommendation(artist))"
+    }
+
+    private func normalizedTitleForRecommendation(_ title: String) -> String {
+        title
             .lowercased()
+            .replacingOccurrences(
+                of: #"[\(\[][^\)\]]*(remix|mixed|mix|edit|version|live|remaster|sped up|slowed|instrumental)[^\)\]]*[\)\]]"#,
+                with: "",
+                options: .regularExpression
+            )
+            .replacingOccurrences(of: #"[^a-z0-9]+"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func normalizedArtistForRecommendation(_ artist: String) -> String {
+        artist
+            .lowercased()
+            .replacingOccurrences(of: #"(\s+feat\.?.*|\s+ft\.?.*)$"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"[^a-z0-9]+"#, with: " ", options: .regularExpression)
             .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
@@ -1166,10 +1523,10 @@ private final class MusicConnectionManager: ObservableObject {
         playingSongID = song.id
         currentSong = song
         isPlaying = true
+        await Task.yield()
         let player = MPMusicPlayerController.applicationMusicPlayer
-        setImmediateQueue(on: player, for: song)
+        setPlaybackQueue(on: player, startingWith: song, in: queueSongs)
         player.play()
-        scheduleContinuousQueueWarmup(startingWith: song, in: queueSongs)
         endPlaybackLoading()
         message = "正在播放：\(song.title)"
     }
@@ -1194,9 +1551,8 @@ private final class MusicConnectionManager: ObservableObject {
             try? await Task.sleep(for: .milliseconds(20))
             guard !Task.isCancelled else { return }
             let player = MPMusicPlayerController.applicationMusicPlayer
-            setImmediateQueue(on: player, for: song)
+            setPlaybackQueue(on: player, startingWith: song, in: queueSongs)
             player.play()
-            scheduleContinuousQueueWarmup(startingWith: song, in: queueSongs)
             endPlaybackLoading()
             message = "正在播放：\(song.title)"
         }
@@ -1223,12 +1579,12 @@ private final class MusicConnectionManager: ObservableObject {
             endPlaybackLoading()
             message = "正在播放：\(song.title)"
         } else {
-            setImmediateQueue(on: player, for: song)
-            player.play()
-            scheduleContinuousQueueWarmup(startingWith: song, in: queueSongs)
             playingSongID = song.id
             currentSong = song
             isPlaying = true
+            await Task.yield()
+            setPlaybackQueue(on: player, startingWith: song, in: queueSongs)
+            player.play()
             endPlaybackLoading()
             message = "正在播放：\(song.title)"
         }
@@ -1328,7 +1684,7 @@ private final class MusicConnectionManager: ObservableObject {
     }
 
     private func song(matching item: MPMediaItem) -> DemoSong? {
-        let allSongs = discoverySongs + librarySongs + recommendedSongs
+        let allSongs = librarySongs + recommendedSongs + discoveryExtraSongs
         if let match = allSongs.first(where: { song in
             song.mediaItem?.persistentID == item.persistentID
         }) {
@@ -1340,7 +1696,7 @@ private final class MusicConnectionManager: ObservableObject {
     }
 
     private func song(from item: MPMediaItem) -> DemoSong {
-        let artworkImage = item.artwork?.image(at: CGSize(width: 420, height: 420))
+        let artworkImage = item.artwork?.image(at: CGSize(width: 220, height: 220))
         let paletteIndex = (item.title?.count ?? 0) % DemoSong.library.count
         let palette = DemoSong.library[paletteIndex].colors
         let magicColor = artworkImage?.magicAverageColor ?? UIColor(songPalette: palette)
@@ -1360,8 +1716,10 @@ private final class MusicConnectionManager: ObservableObject {
     }
 
     private func enrichedSong(_ song: DemoSong, with item: MPMediaItem) -> DemoSong {
-        let artworkImage = item.artwork?.image(at: CGSize(width: 420, height: 420)) ?? song.artworkImage
-        let magicColor = artworkImage?.magicAverageColor.map(Color.init(uiColor:)) ?? song.magicColor
+        let artworkImage = song.artworkImage ?? item.artwork?.image(at: CGSize(width: 220, height: 220))
+        let magicColor = song.artworkImage == nil
+            ? (artworkImage?.magicAverageColor.map(Color.init(uiColor:)) ?? song.magicColor)
+            : song.magicColor
         return DemoSong(
             id: song.id,
             title: item.title ?? song.title,
@@ -1377,13 +1735,8 @@ private final class MusicConnectionManager: ObservableObject {
         )
     }
 
-    private func setImmediateQueue(on player: MPMusicPlayerController, for song: DemoSong) {
-        if let mediaItem = song.mediaItem {
-            player.setQueue(with: MPMediaItemCollection(items: [mediaItem]))
-            player.nowPlayingItem = mediaItem
-        } else if let storeID = song.storeID {
-            player.setQueue(with: [storeID])
-        }
+    private func setPlaybackQueue(on player: MPMusicPlayerController, startingWith song: DemoSong, in queueSongs: [DemoSong]?) {
+        prepareContinuousQueue(on: player, startingWith: song, in: queueSongs)
     }
 
     private func scheduleContinuousQueueWarmup(startingWith song: DemoSong, in queueSongs: [DemoSong]?) {
@@ -1404,7 +1757,7 @@ private final class MusicConnectionManager: ObservableObject {
         in queueSongs: [DemoSong]?
     ) {
         let rotatedSongs = playbackQueueSongs(startingWith: song, in: queueSongs)
-        guard rotatedSongs.count > 1 else { return }
+        guard rotatedSongs.isEmpty == false else { return }
         let items = rotatedSongs.compactMap(\.mediaItem)
         if let mediaItem = song.mediaItem {
             player.setQueue(with: MPMediaItemCollection(items: items.isEmpty ? [mediaItem] : items))
@@ -1438,7 +1791,10 @@ private final class MusicConnectionManager: ObservableObject {
     private func uniquePlayableSongs(from songs: [DemoSong]) -> [DemoSong] {
         var seenIDs = Set<MPMediaEntityPersistentID>()
         var seenStoreIDs = Set<String>()
+        var seenSongKeys = Set<String>()
         return songs.compactMap { song in
+            let key = normalizedSongKey(title: song.title, artist: song.artist)
+            guard seenSongKeys.insert(key).inserted else { return nil }
             if let storeID = song.storeID {
                 guard seenStoreIDs.insert(storeID).inserted else { return nil }
                 return song
@@ -1459,12 +1815,36 @@ private final class MusicConnectionManager: ObservableObject {
         return false
     }
 
+    private func uniqueDiscoverySongs(from songs: [DemoSong]) -> [DemoSong] {
+        var seenKeys = Set<String>()
+        var seenStoreIDs = Set<String>()
+        var seenMediaIDs = Set<MPMediaEntityPersistentID>()
+        return songs.compactMap { song in
+            guard song.isPlaceholder == false else { return song }
+            let key = normalizedSongKey(title: song.title, artist: song.artist)
+            guard seenKeys.insert(key).inserted else { return nil }
+            if let storeID = song.storeID {
+                guard seenStoreIDs.insert(storeID).inserted else { return nil }
+            }
+            if let mediaItem = song.mediaItem {
+                guard seenMediaIDs.insert(mediaItem.persistentID).inserted else { return nil }
+            }
+            return song
+        }
+    }
+
     private func refreshRecommendations() {
+        guard aiRecommendationsEnabled else {
+            recommendationTask?.cancel()
+            recommendedSongs = []
+            discoveryExtraSongs = []
+            return
+        }
         recommendationTask?.cancel()
         recommendedSongs = []
         discoveryExtraSongs = []
 
-        let seedSongs = Array((librarySongs.isEmpty ? DemoSong.library : librarySongs).prefix(24))
+        let seedSongs = Array((spotifySongs + (librarySongs.isEmpty ? DemoSong.library : librarySongs)).prefix(24))
         recommendationTask = Task { @MainActor in
             let recommendations = await fetchAppleCatalogRecommendations(from: seedSongs)
             guard !Task.isCancelled else { return }
@@ -1474,13 +1854,19 @@ private final class MusicConnectionManager: ObservableObject {
 
     private func fetchAppleCatalogRecommendations(from seedSongs: [DemoSong]) async -> [DemoSong] {
         let chartSongs = await fetchAppleChartSongs(seedSongs: seedSongs, maxCount: 18)
+        let latestSongs = await fetchAppleCatalogSongs(
+            queries: latestReleaseQueries(from: seedSongs),
+            seedSongs: seedSongs + chartSongs,
+            maxCount: 24,
+            idBase: 200_000
+        )
         let searchSongs = await fetchAppleCatalogSongs(
             queries: recommendationQueries(from: seedSongs),
-            seedSongs: seedSongs + chartSongs,
-            maxCount: 42,
+            seedSongs: seedSongs + chartSongs + latestSongs,
+            maxCount: 36,
             idBase: 220_000
         )
-        return Array((chartSongs + searchSongs).prefix(54))
+        return Array(uniqueDiscoverySongs(from: latestSongs + chartSongs + searchSongs).prefix(60))
     }
 
     private func fetchAppleChartSongs(seedSongs: [DemoSong], maxCount: Int) async -> [DemoSong] {
@@ -1510,9 +1896,9 @@ private final class MusicConnectionManager: ObservableObject {
         for query in queries {
             guard results.count < maxCount else { break }
             do {
-                let tracks = try await ITunesSearchClient.search(term: query, limit: 10)
+                let tracks = try await ITunesSearchClient.search(term: query, limit: 18)
                 let songs = await songs(
-                    from: tracks,
+                    from: tracks.prioritizingRecentReleases,
                     seedSongs: seedSongs + results,
                     maxCount: maxCount - results.count,
                     idBase: idBase + results.count
@@ -1552,7 +1938,7 @@ private final class MusicConnectionManager: ObservableObject {
             let magicColor = artworkImage?.magicAverageColor ?? UIColor(songPalette: palette)
             results.append(
                 DemoSong(
-                    id: idBase + (Int(track.trackID) ?? results.count) % 80_000,
+                    id: idBase + results.count,
                     title: track.trackName,
                     artist: track.artistName,
                     colors: palette,
@@ -1645,17 +2031,50 @@ private final class MusicConnectionManager: ObservableObject {
         return (0..<8).map { pool[(start + $0) % pool.count] }
     }
 
+    private func latestReleaseQueries(from songs: [DemoSong]) -> [String] {
+        let recentArtistQueries = topArtists(from: songs, limit: 6).flatMap { artist in
+            [
+                "\(artist) latest song",
+                "\(artist) new single",
+                "\(artist) new release"
+            ]
+        }
+        let editorialQueries = [
+            "new music Friday pop",
+            "latest pop releases",
+            "new songs this week",
+            "today new music",
+            "new release pop",
+            "fresh pop singles",
+            "Madonna Confessions II",
+            "Madonna new song",
+            "Charli xcx latest song",
+            "Charli xcx Wink Wink",
+            "Charli xcx SS26"
+        ]
+        return Array((recentArtistQueries + editorialQueries).prefix(28))
+    }
+
     private func recommendationQueries(from songs: [DemoSong]) -> [String] {
-        let artists = Array(
+        let artists = topArtists(from: songs, limit: 8)
+        let styleTerms = inferredStyleTerms(from: songs)
+        let artistQueries = artists.flatMap { artist in
+            [
+                "\(artist) latest songs",
+                "\(artist) top songs"
+            ]
+        }
+        return Array((artistQueries + styleTerms).prefix(14))
+    }
+
+    private func topArtists(from songs: [DemoSong], limit: Int) -> [String] {
+        Array(
             Dictionary(grouping: songs, by: \.artist)
                 .sorted { $0.value.count > $1.value.count }
                 .map(\.key)
                 .filter { $0 != "Unknown Artist" && $0.isEmpty == false }
-                .prefix(8)
+                .prefix(limit)
         )
-        let styleTerms = inferredStyleTerms(from: songs)
-        let artistQueries = artists.map { "\($0) top songs" }
-        return Array((artistQueries + styleTerms).prefix(14))
     }
 
     private func inferredStyleTerms(from songs: [DemoSong]) -> [String] {
@@ -1716,19 +2135,27 @@ private final class MusicConnectionManager: ObservableObject {
     func connectSpotify() async {
         guard !isConnectingSpotify else { return }
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        UIPasteboard.general.string = SpotifyAuthConfig.redirectURI
+        message = "已复制 Spotify 回调地址：\(SpotifyAuthConfig.redirectURI)"
         isConnectingSpotify = true
         defer { isConnectingSpotify = false }
 
         do {
+            try? await Task.sleep(for: .milliseconds(650))
             let token = try await spotifyAuthenticator.authorize()
             spotifyAccessToken = token.accessToken
             spotifyRefreshToken = token.refreshToken ?? spotifyRefreshToken
             spotifyTokenExpiresAt = Date().addingTimeInterval(TimeInterval(token.expiresIn)).timeIntervalSince1970
-            message = "Spotify 已连接"
+            await refreshSpotifySongsIfPossible(showMessage: true)
         } catch {
-            message = error.localizedDescription
+            message = """
+            \(error.localizedDescription)
+            Client ID: \(SpotifyAuthConfig.clientID)
+            Redirect: \(SpotifyAuthConfig.redirectURI)
+            """
         }
     }
+
 }
 
 private struct SpotifyTokenResponse: Decodable {
@@ -1768,15 +2195,197 @@ private enum SpotifyAuthError: LocalizedError {
 }
 
 private enum SpotifyAuthConfig {
-    static let clientID = ""
-    static let redirectURI = "musicfind://spotify-auth"
-    static let callbackScheme = "musicfind"
+    static let clientID = "bfa6de6c24d148db906470a5a4bf0345"
+    static let redirectPort: UInt16 = 8888
+    static let redirectPath = "/callback"
+    static let redirectURI = "http://127.0.0.1:8888/callback"
     static let scopes = [
         "user-read-email",
         "user-read-private",
         "user-library-read",
         "playlist-read-private"
     ]
+}
+
+private enum SpotifyWebAPIClient {
+    static func playlistOptions(accessToken: String, limit: Int) async throws -> [MusicPlaylistOption] {
+        var components = URLComponents(string: "https://api.spotify.com/v1/me/playlists")
+        components?.queryItems = [
+            URLQueryItem(name: "limit", value: "\(limit)")
+        ]
+        guard let url = components?.url else { return [] }
+
+        let response = try await get(SpotifyPlaylistsResponse.self, url: url, accessToken: accessToken)
+        return response.items.map { playlist in
+            MusicPlaylistOption(id: playlist.id, title: playlist.name, count: playlist.tracks?.total ?? 0)
+        }
+    }
+
+    static func discoverySongDrafts(
+        accessToken: String,
+        maxCount: Int,
+        playlistID: String
+    ) async throws -> [SpotifySongDraft] {
+        if playlistID != MusicPlaylistOption.allID {
+            return songDrafts(
+                from: try await playlistTracks(accessToken: accessToken, playlistID: playlistID, limit: maxCount),
+                maxCount: maxCount
+            )
+        }
+
+        async let savedTracks = savedTracks(accessToken: accessToken, limit: 24)
+        async let playlistTracks = tracksFromCurrentUserPlaylists(accessToken: accessToken, playlistLimit: 10, trackLimit: 12)
+        let tracks = try await savedTracks + playlistTracks
+        return songDrafts(from: tracks, maxCount: maxCount)
+    }
+
+    private static func savedTracks(accessToken: String, limit: Int) async throws -> [SpotifyTrack] {
+        var components = URLComponents(string: "https://api.spotify.com/v1/me/tracks")
+        components?.queryItems = [
+            URLQueryItem(name: "limit", value: "\(limit)")
+        ]
+        guard let url = components?.url else { return [] }
+
+        let response = try await get(SpotifySavedTracksResponse.self, url: url, accessToken: accessToken)
+        return response.items.compactMap(\.track)
+    }
+
+    private static func tracksFromCurrentUserPlaylists(
+        accessToken: String,
+        playlistLimit: Int,
+        trackLimit: Int
+    ) async throws -> [SpotifyTrack] {
+        var components = URLComponents(string: "https://api.spotify.com/v1/me/playlists")
+        components?.queryItems = [
+            URLQueryItem(name: "limit", value: "\(playlistLimit)")
+        ]
+        guard let url = components?.url else { return [] }
+
+        let response = try await get(SpotifyPlaylistsResponse.self, url: url, accessToken: accessToken)
+        var tracks: [SpotifyTrack] = []
+        for playlist in response.items.prefix(playlistLimit) {
+            guard tracks.count < playlistLimit * trackLimit else { break }
+            tracks.append(contentsOf: try await playlistTracks(accessToken: accessToken, playlistID: playlist.id, limit: trackLimit))
+        }
+        return tracks
+    }
+
+    private static func playlistTracks(accessToken: String, playlistID: String, limit: Int) async throws -> [SpotifyTrack] {
+        var components = URLComponents(string: "https://api.spotify.com/v1/playlists/\(playlistID)/tracks")
+        components?.queryItems = [
+            URLQueryItem(name: "limit", value: "\(limit)")
+        ]
+        guard let url = components?.url else { return [] }
+
+        let response = try await get(SpotifyPlaylistTracksResponse.self, url: url, accessToken: accessToken)
+        return response.items.compactMap(\.track)
+    }
+
+    private static func get<T: Decodable>(_ type: T.Type, url: URL, accessToken: String) async throws -> T {
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse, (200..<300).contains(httpResponse.statusCode) else {
+            throw SpotifyAuthError.invalidTokenResponse
+        }
+        return try JSONDecoder().decode(type, from: data)
+    }
+
+    private static func songDrafts(from tracks: [SpotifyTrack], maxCount: Int) -> [SpotifySongDraft] {
+        var drafts: [SpotifySongDraft] = []
+        var seenKeys = Set<String>()
+
+        for track in tracks {
+            guard drafts.count < maxCount else { break }
+            let artist = track.artists.map(\.name).joined(separator: ", ")
+            let key = "\(track.name.lowercased())|\(artist.lowercased())"
+            guard seenKeys.insert(key).inserted else { continue }
+            drafts.append(
+                SpotifySongDraft(
+                    id: track.id,
+                    title: track.name,
+                    artist: artist.isEmpty ? "Spotify" : artist,
+                    artworkURL: track.album?.images.first?.url
+                )
+            )
+        }
+
+        return drafts
+    }
+}
+
+private struct SpotifySongDraft: Identifiable {
+    let id: String
+    let title: String
+    let artist: String
+    let artworkURL: String?
+}
+
+private struct SpotifySavedTracksResponse: Decodable {
+    let items: [SpotifySavedTrackItem]
+}
+
+private struct SpotifySavedTrackItem: Decodable {
+    let track: SpotifyTrack?
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        track = try? container.decode(SpotifyTrack.self, forKey: .track)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case track
+    }
+}
+
+private struct SpotifyPlaylistsResponse: Decodable {
+    let items: [SpotifyPlaylistSummary]
+}
+
+private struct SpotifyPlaylistSummary: Decodable {
+    let id: String
+    let name: String
+    let tracks: SpotifyPlaylistTracksSummary?
+}
+
+private struct SpotifyPlaylistTracksSummary: Decodable {
+    let total: Int
+}
+
+private struct SpotifyPlaylistTracksResponse: Decodable {
+    let items: [SpotifyPlaylistTrackItem]
+}
+
+private struct SpotifyPlaylistTrackItem: Decodable {
+    let track: SpotifyTrack?
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        track = try? container.decode(SpotifyTrack.self, forKey: .track)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case track
+    }
+}
+
+private struct SpotifyTrack: Decodable {
+    let id: String
+    let name: String
+    let artists: [SpotifyArtist]
+    let album: SpotifyAlbum?
+}
+
+private struct SpotifyArtist: Decodable {
+    let name: String
+}
+
+private struct SpotifyAlbum: Decodable {
+    let images: [SpotifyImage]
+}
+
+private struct SpotifyImage: Decodable {
+    let url: String
 }
 
 @MainActor
@@ -1791,13 +2400,19 @@ private final class SpotifyPKCEAuthenticator: NSObject, ASWebAuthenticationPrese
         let verifier = Self.randomCodeVerifier()
         let challenge = Self.codeChallenge(for: verifier)
         let state = UUID().uuidString
+        let redirectServer = try SpotifyLocalRedirectServer(
+            port: SpotifyAuthConfig.redirectPort,
+            path: SpotifyAuthConfig.redirectPath
+        )
+        defer { redirectServer.stop() }
+        let redirectURI = SpotifyAuthConfig.redirectURI
 
         var components = URLComponents(string: "https://accounts.spotify.com/authorize")
         components?.queryItems = [
             URLQueryItem(name: "response_type", value: "code"),
             URLQueryItem(name: "client_id", value: SpotifyAuthConfig.clientID),
             URLQueryItem(name: "scope", value: SpotifyAuthConfig.scopes.joined(separator: " ")),
-            URLQueryItem(name: "redirect_uri", value: SpotifyAuthConfig.redirectURI),
+            URLQueryItem(name: "redirect_uri", value: redirectURI),
             URLQueryItem(name: "state", value: state),
             URLQueryItem(name: "code_challenge_method", value: "S256"),
             URLQueryItem(name: "code_challenge", value: challenge)
@@ -1806,8 +2421,9 @@ private final class SpotifyPKCEAuthenticator: NSObject, ASWebAuthenticationPrese
         guard let authURL = components?.url else {
             throw SpotifyAuthError.invalidAuthorizeURL
         }
+        UIPasteboard.general.string = authURL.absoluteString
 
-        let callbackURL = try await authenticate(with: authURL)
+        let callbackURL = try await authenticate(with: authURL, redirectServer: redirectServer)
         guard
             let callbackComponents = URLComponents(url: callbackURL, resolvingAgainstBaseURL: false),
             callbackComponents.queryItems?.first(where: { $0.name == "state" })?.value == state,
@@ -1816,7 +2432,7 @@ private final class SpotifyPKCEAuthenticator: NSObject, ASWebAuthenticationPrese
             throw SpotifyAuthError.missingCallbackCode
         }
 
-        return try await exchangeToken(code: code, verifier: verifier)
+        return try await exchangeToken(code: code, verifier: verifier, redirectURI: redirectURI)
     }
 
     func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
@@ -1826,15 +2442,28 @@ private final class SpotifyPKCEAuthenticator: NSObject, ASWebAuthenticationPrese
             .first { $0.isKeyWindow } ?? ASPresentationAnchor()
     }
 
-    private func authenticate(with url: URL) async throws -> URL {
+    private func authenticate(with url: URL, redirectServer: SpotifyLocalRedirectServer) async throws -> URL {
         try await withCheckedThrowingContinuation { continuation in
-            let session = ASWebAuthenticationSession(url: url, callbackURLScheme: SpotifyAuthConfig.callbackScheme) { callbackURL, error in
-                if let error {
-                    continuation.resume(throwing: error)
-                } else if let callbackURL {
+            var didResume = false
+            let resume: (Result<URL, Error>) -> Void = { result in
+                guard didResume == false else { return }
+                didResume = true
+                self.session?.cancel()
+                switch result {
+                case .success(let callbackURL):
                     continuation.resume(returning: callbackURL)
-                } else {
-                    continuation.resume(throwing: SpotifyAuthError.missingCallbackCode)
+                case .failure(let error):
+                    continuation.resume(throwing: error)
+                }
+            }
+
+            redirectServer.onCallback = { callbackURL in
+                resume(.success(callbackURL))
+            }
+
+            let session = ASWebAuthenticationSession(url: url, callbackURLScheme: nil) { _, error in
+                if let error {
+                    resume(.failure(error))
                 }
             }
             session.presentationContextProvider = self
@@ -1844,7 +2473,7 @@ private final class SpotifyPKCEAuthenticator: NSObject, ASWebAuthenticationPrese
         }
     }
 
-    private func exchangeToken(code: String, verifier: String) async throws -> SpotifyTokenResponse {
+    private func exchangeToken(code: String, verifier: String, redirectURI: String) async throws -> SpotifyTokenResponse {
         guard let url = URL(string: "https://accounts.spotify.com/api/token") else {
             throw SpotifyAuthError.invalidTokenResponse
         }
@@ -1858,8 +2487,33 @@ private final class SpotifyPKCEAuthenticator: NSObject, ASWebAuthenticationPrese
             URLQueryItem(name: "client_id", value: SpotifyAuthConfig.clientID),
             URLQueryItem(name: "grant_type", value: "authorization_code"),
             URLQueryItem(name: "code", value: code),
-            URLQueryItem(name: "redirect_uri", value: SpotifyAuthConfig.redirectURI),
+            URLQueryItem(name: "redirect_uri", value: redirectURI),
             URLQueryItem(name: "code_verifier", value: verifier)
+        ]
+        request.httpBody = components.percentEncodedQuery?.data(using: .utf8)
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse, (200..<300).contains(httpResponse.statusCode) else {
+            throw SpotifyAuthError.invalidTokenResponse
+        }
+
+        return try JSONDecoder().decode(SpotifyTokenResponse.self, from: data)
+    }
+
+    func refreshAccessToken(refreshToken: String) async throws -> SpotifyTokenResponse {
+        guard let url = URL(string: "https://accounts.spotify.com/api/token") else {
+            throw SpotifyAuthError.invalidTokenResponse
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+
+        var components = URLComponents()
+        components.queryItems = [
+            URLQueryItem(name: "client_id", value: SpotifyAuthConfig.clientID),
+            URLQueryItem(name: "grant_type", value: "refresh_token"),
+            URLQueryItem(name: "refresh_token", value: refreshToken)
         ]
         request.httpBody = components.percentEncodedQuery?.data(using: .utf8)
 
@@ -1883,6 +2537,67 @@ private final class SpotifyPKCEAuthenticator: NSObject, ASWebAuthenticationPrese
     }
 }
 
+private final class SpotifyLocalRedirectServer {
+    var onCallback: ((URL) -> Void)?
+
+    private let listener: NWListener
+    private let path: String
+
+    init(port: UInt16, path: String) throws {
+        self.path = path
+        guard let fixedPort = NWEndpoint.Port(rawValue: port) else {
+            throw SpotifyAuthError.invalidAuthorizeURL
+        }
+        listener = try NWListener(using: .tcp, on: fixedPort)
+        listener.newConnectionHandler = { [weak self] connection in
+            self?.handle(connection)
+        }
+        listener.start(queue: .main)
+    }
+
+    func stop() {
+        listener.cancel()
+    }
+
+    private func handle(_ connection: NWConnection) {
+        connection.start(queue: .main)
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 4096) { [weak self] data, _, _, _ in
+            guard let self,
+                  let data,
+                  let request = String(data: data, encoding: .utf8),
+                  let requestLine = request.components(separatedBy: "\r\n").first else {
+                connection.cancel()
+                return
+            }
+
+            let parts = requestLine.split(separator: " ")
+            guard parts.count >= 2 else {
+                connection.cancel()
+                return
+            }
+
+            let target = String(parts[1])
+            let body = "Spotify connected. You can return to musicfind."
+            let response = """
+            HTTP/1.1 200 OK\r
+            Content-Type: text/plain; charset=utf-8\r
+            Content-Length: \(body.utf8.count)\r
+            Connection: close\r
+            \r
+            \(body)
+            """
+
+            connection.send(content: response.data(using: .utf8), completion: .contentProcessed { _ in
+                connection.cancel()
+            })
+
+            guard target.hasPrefix(self.path),
+                  let callbackURL = URL(string: "http://127.0.0.1\(target)") else { return }
+            onCallback?(callbackURL)
+        }
+    }
+}
+
 private extension Data {
     func base64URLEncodedString() -> String {
         base64EncodedString()
@@ -1893,9 +2608,12 @@ private extension Data {
 }
 
 private struct BadgePhysicsPanel: View {
+    let songs: [DemoSong]
     @StateObject private var motion = MotionGravityObserver()
-    @State private var badges: [PhysicsBadge] = PhysicsBadge.samples
+    @State private var badges: [PhysicsBadge] = []
     @State private var lastSize: CGSize = .zero
+    @State private var lastSongIDs: [Int] = []
+    @State private var lastCollisionHapticAt: Date = .distantPast
 
     private let frameRate = Timer.publish(every: 1.0 / 60.0, on: .main, in: .common).autoconnect()
 
@@ -1908,7 +2626,6 @@ private struct BadgePhysicsPanel: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .clipped()
             .onAppear {
                 motion.start()
                 resetBadges(in: proxy.size)
@@ -1919,23 +2636,37 @@ private struct BadgePhysicsPanel: View {
             .onChange(of: proxy.size) { newSize in
                 resetBadges(in: newSize)
             }
+            .onChange(of: panelSongs.map(\.id)) { _ in
+                resetBadges(in: proxy.size, force: true)
+            }
             .onReceive(frameRate) { _ in
                 stepBadges(in: proxy.size)
             }
         }
     }
 
-    private func resetBadges(in size: CGSize) {
-        guard size.width > 10, size.height > 10, size != lastSize else { return }
+    private var panelSongs: [DemoSong] {
+        let source = songs.isEmpty ? DemoSong.library : songs
+        return Array(source.prefix(16))
+    }
+
+    private func resetBadges(in size: CGSize, force: Bool = false) {
+        let ids = panelSongs.map(\.id)
+        guard size.width > 10, size.height > 10, force || size != lastSize || ids != lastSongIDs else { return }
         lastSize = size
-        let columns: [CGFloat] = [0.20, 0.40, 0.60, 0.80]
-        badges = badges.enumerated().map { index, badge in
-            var next = badge
+        lastSongIDs = ids
+        let columns: [CGFloat] = [0.13, 0.31, 0.49, 0.67, 0.85]
+        badges = panelSongs.enumerated().map { index, song in
+            let radius: CGFloat = [26, 30, 24, 28, 32, 25, 29, 27][index % 8]
             let column = columns[index % columns.count]
             let row = CGFloat(index / columns.count)
-            next.position = CGPoint(x: size.width * column, y: 54 + row * 54)
-            next.velocity = CGPoint(x: CGFloat(index % 2 == 0 ? 22 : -18), y: CGFloat(index % 3 == 0 ? 10 : -12))
-            return next
+            return PhysicsBadge(
+                id: song.id,
+                radius: radius,
+                song: song,
+                position: CGPoint(x: size.width * column, y: 44 + row * 50),
+                velocity: CGPoint(x: CGFloat(index % 2 == 0 ? 40 : -34), y: CGFloat(index % 3 == 0 ? 20 : -24))
+            )
         }
     }
 
@@ -1943,10 +2674,11 @@ private struct BadgePhysicsPanel: View {
         guard size.width > 10, size.height > 10 else { return }
 
         var next = badges
+        var strongestImpact: CGFloat = 0
         let gravity = motion.gravity
-        let acceleration = CGPoint(x: CGFloat(gravity.x) * 760, y: CGFloat(-gravity.y) * 760)
+        let acceleration = CGPoint(x: CGFloat(gravity.x) * 1_020, y: CGFloat(-gravity.y) * 1_020)
         let dt: CGFloat = 1.0 / 60.0
-        let damping: CGFloat = 0.986
+        let damping: CGFloat = 0.992
 
         for index in next.indices {
             next[index].velocity.x = (next[index].velocity.x + acceleration.x * dt) * damping
@@ -1956,39 +2688,44 @@ private struct BadgePhysicsPanel: View {
 
             let radius = next[index].radius
             if next[index].position.x < radius {
+                strongestImpact = max(strongestImpact, abs(next[index].velocity.x))
                 next[index].position.x = radius
-                next[index].velocity.x = abs(next[index].velocity.x) * 0.72
+                next[index].velocity.x = abs(next[index].velocity.x) * 0.80
             } else if next[index].position.x > size.width - radius {
+                strongestImpact = max(strongestImpact, abs(next[index].velocity.x))
                 next[index].position.x = size.width - radius
-                next[index].velocity.x = -abs(next[index].velocity.x) * 0.72
+                next[index].velocity.x = -abs(next[index].velocity.x) * 0.80
             }
 
             if next[index].position.y < radius {
+                strongestImpact = max(strongestImpact, abs(next[index].velocity.y))
                 next[index].position.y = radius
-                next[index].velocity.y = abs(next[index].velocity.y) * 0.72
+                next[index].velocity.y = abs(next[index].velocity.y) * 0.80
             } else if next[index].position.y > size.height - radius {
+                strongestImpact = max(strongestImpact, abs(next[index].velocity.y))
                 next[index].position.y = size.height - radius
-                next[index].velocity.y = -abs(next[index].velocity.y) * 0.72
+                next[index].velocity.y = -abs(next[index].velocity.y) * 0.80
             }
         }
 
         for left in next.indices {
             for right in next.indices where right > left {
-                resolveCollision(left, right, badges: &next)
+                strongestImpact = max(strongestImpact, resolveCollision(left, right, badges: &next))
             }
         }
 
         badges = next
+        triggerCollisionHapticIfNeeded(strength: strongestImpact)
     }
 
-    private func resolveCollision(_ left: Int, _ right: Int, badges: inout [PhysicsBadge]) {
+    private func resolveCollision(_ left: Int, _ right: Int, badges: inout [PhysicsBadge]) -> CGFloat {
         let delta = CGPoint(
             x: badges[right].position.x - badges[left].position.x,
             y: badges[right].position.y - badges[left].position.y
         )
         let distance = max(0.001, sqrt(delta.x * delta.x + delta.y * delta.y))
         let minimumDistance = badges[left].radius + badges[right].radius
-        guard distance < minimumDistance else { return }
+        guard distance < minimumDistance else { return 0 }
 
         let normal = CGPoint(x: delta.x / distance, y: delta.y / distance)
         let overlap = (minimumDistance - distance) * 0.5
@@ -2002,13 +2739,23 @@ private struct BadgePhysicsPanel: View {
             y: badges[right].velocity.y - badges[left].velocity.y
         )
         let speed = relativeVelocity.x * normal.x + relativeVelocity.y * normal.y
-        guard speed < 0 else { return }
+        guard speed < 0 else { return 0 }
 
         let impulse = -speed * 0.82
         badges[left].velocity.x -= normal.x * impulse
         badges[left].velocity.y -= normal.y * impulse
         badges[right].velocity.x += normal.x * impulse
         badges[right].velocity.y += normal.y * impulse
+        return impulse
+    }
+
+    private func triggerCollisionHapticIfNeeded(strength: CGFloat) {
+        guard strength > 38 else { return }
+        let now = Date()
+        guard now.timeIntervalSince(lastCollisionHapticAt) > 0.07 else { return }
+        lastCollisionHapticAt = now
+        let intensity = min(0.95, max(0.40, strength / 420))
+        UIImpactFeedbackGenerator(style: .rigid).impactOccurred(intensity: intensity)
     }
 }
 
@@ -2020,41 +2767,34 @@ private struct BadgeCircle: View {
             Circle()
                 .fill(
                     LinearGradient(
-                        colors: badge.colors,
+                        colors: badge.song.colors,
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     )
                 )
 
-            Image(systemName: badge.systemName)
-                .font(.system(size: badge.radius * 0.62, weight: .black))
-                .foregroundStyle(.white.opacity(0.92))
+            if let artworkImage = PlayerArtworkWarmupCache.shared.artwork(for: badge.song) ?? badge.song.artworkImage {
+                Image(uiImage: artworkImage)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+            }
         }
         .frame(width: badge.radius * 2, height: badge.radius * 2)
+        .clipShape(Circle())
         .overlay {
             Circle()
                 .stroke(.white.opacity(0.18), lineWidth: 1)
         }
-        .shadow(color: badge.colors.first?.opacity(0.22) ?? .clear, radius: 14, y: 8)
+        .shadow(color: badge.song.magicColor.opacity(0.22), radius: 12, y: 7)
     }
 }
 
 private struct PhysicsBadge: Identifiable {
     let id: Int
     let radius: CGFloat
-    let systemName: String
-    let colors: [Color]
+    let song: DemoSong
     var position: CGPoint = .zero
     var velocity: CGPoint = .zero
-
-    static let samples: [PhysicsBadge] = [
-        .init(id: 1, radius: 34, systemName: "music.note", colors: [.pink, .red]),
-        .init(id: 2, radius: 28, systemName: "star.fill", colors: [.yellow, .orange]),
-        .init(id: 3, radius: 31, systemName: "bolt.fill", colors: [.cyan, .blue]),
-        .init(id: 4, radius: 26, systemName: "heart.fill", colors: [.purple, .indigo]),
-        .init(id: 5, radius: 30, systemName: "waveform", colors: [.mint, .green]),
-        .init(id: 6, radius: 27, systemName: "sparkles", colors: [.orange, .red])
-    ]
 }
 
 private final class MotionGravityObserver: ObservableObject {
@@ -2082,10 +2822,15 @@ private final class ShakeMotionObserver: ObservableObject {
 
     private let manager = CMMotionManager()
     private var lastShakeDate = Date.distantPast
+    private var shakeStrikeCount = 0
+    private var lastStrikeDate = Date.distantPast
     private var lastMagnitude = 1.0
 
     func start() {
         guard manager.isAccelerometerAvailable else { return }
+        shakeStrikeCount = 0
+        lastStrikeDate = .distantPast
+        lastMagnitude = 1.0
         manager.accelerometerUpdateInterval = 1.0 / 30.0
         manager.startAccelerometerUpdates(to: .main) { [weak self] data, _ in
             guard let self, let data else { return }
@@ -2106,9 +2851,26 @@ private final class ShakeMotionObserver: ObservableObject {
         let impulse = abs(magnitude - lastMagnitude)
         lastMagnitude = magnitude
 
-        guard magnitude > 1.85 || impulse > 0.95 else { return }
-        guard Date().timeIntervalSince(lastShakeDate) > 0.55 else { return }
-        lastShakeDate = Date()
+        let now = Date()
+        guard now.timeIntervalSince(lastShakeDate) > 1.15 else { return }
+
+        guard magnitude > 2.35 || impulse > 1.24 else {
+            if now.timeIntervalSince(lastStrikeDate) > 0.28 {
+                shakeStrikeCount = 0
+            }
+            return
+        }
+
+        if now.timeIntervalSince(lastStrikeDate) > 0.34 {
+            shakeStrikeCount = 1
+        } else {
+            shakeStrikeCount += 1
+        }
+        lastStrikeDate = now
+
+        guard shakeStrikeCount >= 3 else { return }
+        shakeStrikeCount = 0
+        lastShakeDate = now
         shakeCount += 1
         shakeEventID = UUID()
     }
@@ -2303,6 +3065,18 @@ private struct BottomNavigationBar: View {
     @Binding var playerPillFrame: CGRect
     let onPlayerTap: () -> Void
     let onTogglePlayback: () -> Void
+    let onPrevious: () -> Void
+    let onNext: () -> Void
+
+    private var pillWidth: CGFloat {
+        let title = isPlaying ? nowPlaying.title : "FlipMusic"
+        let subtitle = isPlaying ? nowPlaying.artist : "A simple way to listen music"
+        let titleWidth = measuredTextWidth(title, size: 14, weight: .bold)
+        let subtitleWidth = measuredTextWidth(subtitle, size: isPlaying ? 12 : 11, weight: .medium)
+        let textWidth = max(titleWidth, subtitleWidth)
+        let chromeWidth: CGFloat = 11 + 38 + 10 + 8 + 34 + 12
+        return min(max(chromeWidth + textWidth + 8, 190), 356)
+    }
 
     var body: some View {
         HStack {
@@ -2314,12 +3088,500 @@ private struct BottomNavigationBar: View {
                 isPlayerCardVisible: isPlayerCardVisible,
                 playerPillFrame: $playerPillFrame,
                 action: onPlayerTap,
-                onTogglePlayback: onTogglePlayback
+                onTogglePlayback: onTogglePlayback,
+                onPrevious: onPrevious,
+                onNext: onNext
             )
         }
-        .frame(maxWidth: 246)
+        .frame(width: pillWidth)
         .scaleEffect(isDropTargeted ? 1.10 : 1)
         .animation(.smooth(duration: 0.18, extraBounce: 0.0), value: isDropTargeted)
+        .animation(.bouncy(duration: 0.48, extraBounce: 0.18), value: pillWidth)
+    }
+
+    private func measuredTextWidth(_ text: String, size: CGFloat, weight: UIFont.Weight) -> CGFloat {
+        let font = UIFont.systemFont(ofSize: size, weight: weight)
+        return ceil((text as NSString).size(withAttributes: [.font: font]).width)
+    }
+}
+
+private struct MusicSparkleField: View {
+    let song: DemoSong
+
+    private enum ParticleMood {
+        case sparkle
+        case square
+        case triangle
+    }
+
+    private var rhythm: Double {
+        song.rhythmEnergy
+    }
+
+    private var particleMood: ParticleMood {
+        switch particleMoodIndex {
+        case 1, 4:
+            return .square
+        case 2, 5:
+            return .triangle
+        default:
+            return .sparkle
+        }
+    }
+
+    private var particleMoodIndex: Int {
+        let key = "\(song.title)|\(song.artist)"
+        let folded = key.unicodeScalars.reduce(abs(song.id)) { partial, scalar in
+            (partial &* 31 &+ Int(scalar.value)) & 0x7fffffff
+        }
+        return folded % 6
+    }
+
+    private var moodShapeShare: CGFloat {
+        switch particleMood {
+        case .sparkle:
+            return 0.0
+        case .square, .triangle:
+            return 0.78
+        }
+    }
+
+    private var sparkleCount: Int {
+        Int(86 + rhythm * 88)
+    }
+
+    private var riseDuration: Double {
+        8.2 - rhythm * 2.4
+    }
+
+    private var estimatedBPM: Double {
+        72 + rhythm * 66
+    }
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 15.0, paused: false)) { timeline in
+            Canvas { context, size in
+                let time = timeline.date.timeIntervalSinceReferenceDate
+                let count = sparkleCount
+                let travelHeight = size.height * 1.02
+                let baseY = size.height + 56
+                let beatProgress = (time * estimatedBPM / 60).truncatingRemainder(dividingBy: 1)
+                let beatPulse = exp(-beatProgress * 7)
+                let offbeatPulse = exp(-abs(beatProgress - 0.5) * 7) * 0.18
+                let pulse = min(0.42, beatPulse * 0.34 + offbeatPulse)
+                let mood = particleMood
+                let shapeShare = moodShapeShare
+
+                for index in 0..<count {
+                    let seed = Double(index + 1)
+                    let delay = random(seed, 0.31) * 1.24
+                    let loopDuration = riseDuration + random(seed, 0.73) * 2.20
+                    let rawProgress = (time / max(loopDuration, 3.4) + delay).truncatingRemainder(dividingBy: 1)
+                    let easedProgress = 1 - pow(1 - rawProgress, 1.18 + pulse * 0.06)
+                    let randomX = size.width * random(seed, 1.13)
+                    let birthScatter = CGFloat((random(seed, 10.7) - 0.5) * size.width * (0.08 + rhythm * 0.12))
+                    let upperScatter = CGFloat((random(seed, 9.51) - 0.5) * size.width * (0.34 + rhythm * 0.22)) * CGFloat(easedProgress)
+                    let drift = CGFloat(sin(time * (0.10 + seed * 0.008) + seed) * (9 + pulse * 4))
+                    let centerX = randomX + birthScatter + upperScatter + drift
+                    let centerY = baseY - CGFloat(easedProgress) * travelHeight
+                    let twinkle = 0.78 + 0.22 * sin(time * (0.45 + seed * 0.025) + seed * 1.31)
+                    let fadeIn = min(rawProgress / 0.28, 1)
+                    let fadeOut = min((1 - rawProgress) / 0.46, 1)
+                    let verticalDensity = pow(max(0, 1 - rawProgress), 1.78)
+                    let alpha = min(
+                        1.0,
+                        max(0, fadeIn * fadeOut) * (0.32 + rhythm * 0.20 + pulse * 0.04) * twinkle * (0.30 + verticalDensity * 1.64) * 2.15
+                    )
+                    guard alpha > 0.035 else { continue }
+                    let radiusJitter = Double(random(seed, 2.41))
+                    let radiusScale = (1.30 + rhythm * 0.48 + pulse * 0.10) * (0.72 + verticalDensity * 0.34)
+                    let radius = CGFloat(0.38 + radiusJitter * radiusScale)
+                    let point = CGPoint(x: centerX, y: centerY)
+                    drawParticle(
+                        in: &context,
+                        point: point,
+                        radius: radius,
+                        alpha: alpha,
+                        seed: seed,
+                        pulse: pulse,
+                        mood: mood,
+                        shapeShare: shapeShare
+                    )
+                }
+            }
+        }
+        .blendMode(.screen)
+        .opacity(0.88)
+    }
+
+    private func drawParticle(
+        in context: inout GraphicsContext,
+        point: CGPoint,
+        radius: CGFloat,
+        alpha: Double,
+        seed: Double,
+        pulse: Double,
+        mood: ParticleMood,
+        shapeShare: CGFloat
+    ) {
+        let type = random(seed, 3.17)
+        let tint = particleTint(for: seed)
+        let coreTint = random(seed, 12.4) > 0.68 ? tint : Color.white
+        let useMoodShape = random(seed, 5.53) < shapeShare
+        let corePath = useMoodShape
+            ? particleCorePath(mood: mood, center: point, radius: radius, seed: seed)
+            : Path(ellipseIn: CGRect(x: point.x - radius * 0.50, y: point.y - radius * 0.50, width: radius, height: radius))
+
+        if type < 0.82 {
+            context.opacity = alpha * 1.28
+            context.fill(
+                corePath,
+                with: .color(coreTint.opacity(0.94))
+            )
+        } else if type < 0.97 {
+            context.opacity = alpha * (0.34 + pulse * 0.02)
+            context.fill(
+                Path(ellipseIn: CGRect(
+                    x: point.x - radius * 1.28,
+                    y: point.y - radius * 1.28,
+                    width: radius * 2.56,
+                    height: radius * 2.56
+                )),
+                with: .color(tint.opacity(0.30))
+            )
+
+            context.opacity = alpha * 1.18
+            context.fill(
+                useMoodShape
+                    ? particleCorePath(mood: mood, center: point, radius: radius * 0.98, seed: seed)
+                    : Path(ellipseIn: CGRect(x: point.x - radius * 0.48, y: point.y - radius * 0.48, width: radius * 0.96, height: radius * 0.96)),
+                with: .color(coreTint.opacity(0.88))
+            )
+        } else {
+            context.opacity = alpha * (0.68 + pulse * 0.04)
+            context.fill(
+                sparklePath(center: point, radius: radius * 1.65),
+                with: .color(coreTint.opacity(0.74))
+            )
+
+            context.opacity = alpha * (0.36 + pulse * 0.03)
+            context.fill(
+                sparklePath(center: point, radius: radius * 2.9),
+                with: .color(tint.opacity(0.50))
+            )
+        }
+    }
+
+    private func particleTint(for seed: Double) -> Color {
+        let pick = random(seed, 8.19)
+        if pick < 0.18 {
+            return Color(red: 0.62, green: 0.86, blue: 1.0)
+        } else if pick < 0.34 {
+            return Color(red: 1.0, green: 0.82, blue: 0.58)
+        } else if pick < 0.48 {
+            return Color(red: 0.82, green: 0.72, blue: 1.0)
+        } else if pick < 0.60 {
+            return Color(red: 0.72, green: 1.0, blue: 0.90)
+        }
+
+        guard song.colors.isEmpty == false else {
+            return song.magicColor
+        }
+        let colorIndex = min(
+            song.colors.count - 1,
+            Int(Double(song.colors.count) * Double(random(seed, 12.83)))
+        )
+        return song.colors[colorIndex]
+    }
+
+    private func particleCorePath(mood: ParticleMood, center: CGPoint, radius: CGFloat, seed: Double) -> Path {
+        switch mood {
+        case .square:
+            let side = radius * 1.22
+            if random(seed, 7.91) > 0.52 {
+                var path = Path()
+                path.move(to: CGPoint(x: center.x, y: center.y - side * 0.62))
+                path.addLine(to: CGPoint(x: center.x + side * 0.62, y: center.y))
+                path.addLine(to: CGPoint(x: center.x, y: center.y + side * 0.62))
+                path.addLine(to: CGPoint(x: center.x - side * 0.62, y: center.y))
+                path.closeSubpath()
+                return path
+            }
+            return Path(CGRect(x: center.x - side * 0.5, y: center.y - side * 0.5, width: side, height: side))
+        case .triangle:
+            let side = radius * 1.52
+            var path = Path()
+            path.move(to: CGPoint(x: center.x, y: center.y - side * 0.62))
+            path.addLine(to: CGPoint(x: center.x + side * 0.58, y: center.y + side * 0.42))
+            path.addLine(to: CGPoint(x: center.x - side * 0.58, y: center.y + side * 0.42))
+            path.closeSubpath()
+            return path
+        case .sparkle:
+            return sparklePath(center: center, radius: radius * 1.35)
+        }
+    }
+
+    private func random(_ seed: Double, _ salt: Double) -> CGFloat {
+        let value = sin((seed + salt) * 12.9898) * 43758.5453
+        return CGFloat(value - floor(value))
+    }
+
+    private func sparklePath(center: CGPoint, radius: CGFloat) -> Path {
+        var path = Path()
+        path.move(to: CGPoint(x: center.x, y: center.y - radius))
+        path.addLine(to: CGPoint(x: center.x + radius * 0.25, y: center.y - radius * 0.25))
+        path.addLine(to: CGPoint(x: center.x + radius, y: center.y))
+        path.addLine(to: CGPoint(x: center.x + radius * 0.25, y: center.y + radius * 0.25))
+        path.addLine(to: CGPoint(x: center.x, y: center.y + radius))
+        path.addLine(to: CGPoint(x: center.x - radius * 0.25, y: center.y + radius * 0.25))
+        path.addLine(to: CGPoint(x: center.x - radius, y: center.y))
+        path.addLine(to: CGPoint(x: center.x - radius * 0.25, y: center.y - radius * 0.25))
+        path.closeSubpath()
+        return path
+    }
+}
+
+private struct CarouselPlayerOverlay: View {
+    let songs: [DemoSong]
+    @Binding var nowPlaying: DemoSong
+    let isPlaying: Bool
+    let isContentVisible: Bool
+    let onClose: () -> Void
+    let onTogglePlayback: () -> Void
+    let onSongChange: (DemoSong) -> Void
+
+    @State private var currentIndex = 0
+    @State private var dragOffset: CGFloat = 0
+
+    var body: some View {
+        GeometryReader { proxy in
+            let safeTop = proxy.safeAreaInsets.top
+            let safeBottom = proxy.safeAreaInsets.bottom
+            let coverSide = min(max(proxy.size.width * 0.48, 210), 330)
+            let centerY = proxy.size.height * 0.42
+
+            ZStack {
+                ForEach(visibleOffsets, id: \.self) { relativeOffset in
+                    if let song = song(atRelativeOffset: relativeOffset) {
+                        carouselCover(
+                            song: song,
+                            relativeOffset: relativeOffset,
+                            coverSide: coverSide,
+                            centerY: centerY,
+                            width: proxy.size.width
+                        )
+                    }
+                }
+
+                VStack(spacing: 18) {
+                    Spacer()
+
+                    HStack(spacing: 22) {
+                        carouselControl("backward.end.fill", isEnabled: hasPrevious) {
+                            move(by: -1)
+                        }
+
+                        Button(action: onTogglePlayback) {
+                            Image(systemName: isPlaying ? "pause.fill" : "play.fill")
+                                .font(.system(size: 26, weight: .black))
+                                .foregroundStyle(.white)
+                                .frame(width: 64, height: 64)
+                                .background(.black.opacity(0.86))
+                                .clipShape(Circle())
+                                .shadow(color: .black.opacity(0.32), radius: 16, y: 8)
+                        }
+                        .buttonStyle(.plain)
+
+                        carouselControl("forward.end.fill", isEnabled: hasNext) {
+                            move(by: 1)
+                        }
+                    }
+
+                    Text(playerDescription(for: currentSong))
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.68))
+                        .multilineTextAlignment(.center)
+                        .lineLimit(2)
+                        .minimumScaleFactor(0.78)
+                        .frame(maxWidth: min(proxy.size.width - 70, 420))
+                        .padding(.bottom, safeBottom + 34)
+                }
+
+                Button(action: onClose) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(.white.opacity(0.84))
+                        .frame(width: 38, height: 38)
+                        .background(.black.opacity(0.34))
+                        .clipShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .position(x: proxy.size.width - 34, y: safeTop + 34)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .opacity(isContentVisible ? 1 : 0)
+            .scaleEffect(isContentVisible ? 1 : 0.98)
+            .gesture(
+                DragGesture(minimumDistance: 8)
+                    .onChanged { value in
+                        dragOffset = value.translation.width
+                    }
+                    .onEnded { value in
+                        let threshold = proxy.size.width * 0.18
+                        if value.translation.width < -threshold || value.predictedEndTranslation.width < -threshold * 1.6 {
+                            move(by: 1)
+                        } else if value.translation.width > threshold || value.predictedEndTranslation.width > threshold * 1.6 {
+                            move(by: -1)
+                        }
+                        withAnimation(.smooth(duration: 0.18, extraBounce: 0.0)) {
+                            dragOffset = 0
+                        }
+                    }
+            )
+            .onAppear {
+                currentIndex = indexForNowPlaying()
+                PlayerArtworkWarmupCache.shared.preload(songs: Array(songs.prefix(12)))
+            }
+            .onChange(of: nowPlaying.id) { _, _ in
+                currentIndex = indexForNowPlaying()
+                preloadNearbyArtwork()
+            }
+            .onChange(of: songs.count) { _, _ in
+                currentIndex = min(indexForNowPlaying(), max(songs.count - 1, 0))
+                preloadNearbyArtwork()
+            }
+        }
+    }
+
+    private var visibleOffsets: [Int] {
+        [-3, -2, -1, 0, 1, 2, 3]
+    }
+
+    private var currentSong: DemoSong {
+        guard songs.indices.contains(currentIndex) else { return nowPlaying }
+        return songs[currentIndex]
+    }
+
+    private var hasPrevious: Bool {
+        currentIndex > 0
+    }
+
+    private var hasNext: Bool {
+        currentIndex < songs.count - 1
+    }
+
+    private func song(atRelativeOffset offset: Int) -> DemoSong? {
+        let index = currentIndex + offset
+        guard songs.indices.contains(index) else { return nil }
+        return songs[index]
+    }
+
+    private func carouselCover(
+        song: DemoSong,
+        relativeOffset: Int,
+        coverSide: CGFloat,
+        centerY: CGFloat,
+        width: CGFloat
+    ) -> some View {
+        let absoluteOffset = abs(relativeOffset)
+        let dragAngle = Double(dragOffset / max(width, 1)) * 44
+        let angle = Double(relativeOffset) * 28 - dragAngle
+        let angleRadians = angle * .pi / 180
+        let radiusX = coverSide * 1.28
+        let radiusY = coverSide * 0.16
+        let xOffset = sin(angleRadians) * radiusX + dragOffset
+        let depth = (1 - cos(angleRadians))
+        let scale = relativeOffset == 0 ? 1.0 : max(0.40, 1.0 - CGFloat(depth) * 0.50 - CGFloat(absoluteOffset) * 0.05)
+        let opacity = relativeOffset == 0 ? 1.0 : max(0.25, 0.88 - depth * 0.48 - Double(absoluteOffset) * 0.05)
+        let rotation = -angle
+        let yOffset = CGFloat(depth) * radiusY + CGFloat(absoluteOffset) * 3
+
+        return PlayerSquareArtwork(song: song)
+            .frame(width: coverSide, height: coverSide)
+            .clipShape(RoundedRectangle(cornerRadius: relativeOffset == 0 ? 24 : 18, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: relativeOffset == 0 ? 24 : 18, style: .continuous)
+                    .stroke(.white.opacity(relativeOffset == 0 ? 0.18 : 0.10), lineWidth: 1)
+            }
+            .shadow(color: .black.opacity(relativeOffset == 0 ? 0.38 : 0.18), radius: relativeOffset == 0 ? 26 : 12, y: 12)
+            .scaleEffect(scale)
+            .rotation3DEffect(.degrees(rotation), axis: (x: 0, y: 1, z: 0), perspective: 0.62)
+            .offset(x: xOffset, y: yOffset)
+            .position(x: width / 2, y: centerY)
+            .opacity(opacity)
+            .zIndex(Double(10 - absoluteOffset))
+            .onTapGesture {
+                if relativeOffset == 0 {
+                    onTogglePlayback()
+                } else {
+                    move(by: relativeOffset)
+                }
+            }
+    }
+
+    private func carouselControl(_ systemName: String, isEnabled: Bool, action: @escaping () -> Void) -> some View {
+        Button {
+            guard isEnabled else { return }
+            action()
+        } label: {
+            Image(systemName: systemName)
+                .font(.system(size: 18, weight: .black))
+                .foregroundStyle(.white.opacity(isEnabled ? 0.9 : 0.22))
+                .frame(width: 36, height: 36)
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!isEnabled)
+    }
+
+    private func move(by step: Int) {
+        guard songs.isEmpty == false else { return }
+        let nextIndex = min(max(currentIndex + step, 0), songs.count - 1)
+        guard nextIndex != currentIndex else { return }
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        withAnimation(.interactiveSpring(response: 0.34, dampingFraction: 0.86, blendDuration: 0.02)) {
+            currentIndex = nextIndex
+        }
+        let song = songs[nextIndex]
+        nowPlaying = song
+        preloadNearbyArtwork()
+        onSongChange(song)
+    }
+
+    private func indexForNowPlaying() -> Int {
+        songs.firstIndex(where: { $0.id == nowPlaying.id }) ?? 0
+    }
+
+    private func preloadNearbyArtwork() {
+        guard songs.isEmpty == false else { return }
+        let lower = max(currentIndex - 3, 0)
+        let upper = min(currentIndex + 5, songs.count - 1)
+        PlayerArtworkWarmupCache.shared.preload(songs: Array(songs[lower...upper]))
+    }
+
+    private func playerDescription(for song: DemoSong) -> String {
+        let titleText = "\(song.title) \(song.artist)".lowercased()
+        if titleText.contains("hip") || titleText.contains("rap") {
+            return "Conscious hip hop with sharp rhythm, warm texture, and forward motion"
+        }
+        if titleText.contains("dance") || titleText.contains("club") || titleText.contains("dua") {
+            return "Polished dance pop with bright hooks and clean late-night momentum"
+        }
+        if titleText.contains("soundtrack") || titleText.contains("score") {
+            return "Cinematic detail, wide dynamics, and a spacious emotional arc"
+        }
+        if titleText.contains("r&b") || titleText.contains("weeknd") {
+            return "Smooth R&B color with soft pressure, glossy space, and slow burn"
+        }
+        return "A focused listen with rich color, clear movement, and an easy repeat feel"
+    }
+}
+
+private struct PlayerSquareArtwork: View {
+    let song: DemoSong
+
+    var body: some View {
+        SongSquare(song: song, isPlaying: false)
     }
 }
 
@@ -2957,30 +4219,39 @@ private struct PlayerPill: View {
     @Binding var playerPillFrame: CGRect
     let action: () -> Void
     let onTogglePlayback: () -> Void
+    let onPrevious: () -> Void
+    let onNext: () -> Void
+    @GestureState private var dragTranslation: CGFloat = 0
+    @State private var committedArtworkOffset: CGFloat = 0
+    @State private var isTextVisible = true
+
+    private var boundedDragOffset: CGFloat {
+        max(-96, min(96, dragTranslation))
+    }
+
+    private var artworkOffset: CGFloat {
+        committedArtworkOffset + boundedDragOffset
+    }
 
     var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 27, style: .continuous)
-                .fill(.black.opacity(0.74))
+            PlayerPillGlassBackground(song: song, isActive: isActive)
 
             HStack(spacing: 10) {
                 RotatingAlbumArt(song: song, isSpinning: isPlaying)
+                    .offset(x: artworkOffset)
+                    .opacity(max(0.18, 1 - abs(artworkOffset) / 92))
+                    .scaleEffect(1 - min(abs(artworkOffset) / 260, 0.10))
+                    .animation(.smooth(duration: 0.16, extraBounce: 0.0), value: committedArtworkOffset)
+                    .animation(.smooth(duration: 0.12, extraBounce: 0.0), value: dragTranslation)
 
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(song.title)
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundStyle(.white)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.68)
-
-                    Text(song.artist)
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.82))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.72)
-                }
+                PlayerPillSongText(song: song, isPlaying: isPlaying)
+                    .id(song.id)
+                    .opacity(isTextVisible ? max(0.18, 1 - abs(boundedDragOffset) / 120) : 0)
+                    .offset(x: boundedDragOffset * 0.18)
+                    .animation(.easeInOut(duration: 0.16), value: isTextVisible)
+                    .animation(.smooth(duration: 0.12, extraBounce: 0.0), value: dragTranslation)
                 .contentShape(Rectangle())
-                .onTapGesture(perform: action)
 
                 Spacer(minLength: 8)
 
@@ -2996,14 +4267,53 @@ private struct PlayerPill: View {
             .padding(.trailing, 12)
             .opacity(isPlayerCardVisible ? 0 : 1)
         }
+        .frame(maxWidth: .infinity)
         .frame(height: 53)
+        .background {
+            PlayerPillGlassAura(song: song, isActive: isActive)
+        }
         .clipShape(RoundedRectangle(cornerRadius: 27))
         .overlay {
             RoundedRectangle(cornerRadius: 27)
-                .stroke(.white.opacity(isActive ? 0.20 : 0.08), lineWidth: 1)
+                .stroke(.white.opacity(isActive ? 0.18 : 0.10), lineWidth: 0.8)
         }
+        .overlay {
+            RoundedRectangle(cornerRadius: 27)
+                .stroke(
+                    LinearGradient(
+                        colors: [
+                            .white.opacity(0.30),
+                            .white.opacity(0.08),
+                            song.magicColor.opacity(0.14),
+                            .clear
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
+                    lineWidth: 1
+                )
+                .mask(
+                    LinearGradient(
+                        colors: [.black, .black.opacity(0.72), .clear],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+        }
+        .shadow(color: .white.opacity(0.06), radius: 14, y: -5)
+        .shadow(color: song.magicColor.opacity(0.12), radius: 18, y: 6)
+        .shadow(color: .black.opacity(0.18), radius: 18, y: 9)
         .contentShape(RoundedRectangle(cornerRadius: 27))
         .onTapGesture(perform: action)
+        .gesture(
+            DragGesture(minimumDistance: 12)
+                .updating($dragTranslation) { value, state, _ in
+                    state = value.translation.width
+                }
+                .onEnded { value in
+                    finishSwipe(value)
+                }
+        )
         .liquidGlassSurface(cornerRadius: 27, isInteractive: true)
         .background {
             GeometryReader { proxy in
@@ -3014,7 +4324,185 @@ private struct PlayerPill: View {
         .onPreferenceChange(PlayerPillFramePreferenceKey.self) { frame in
             playerPillFrame = frame
         }
+        .onChange(of: song.id) { _, _ in
+            isTextVisible = false
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+                withAnimation(.easeOut(duration: 0.18)) {
+                    isTextVisible = true
+                }
+            }
+        }
         .opacity(isPlayerCardVisible ? 0 : 1)
+    }
+
+    private func finishSwipe(_ value: DragGesture.Value) {
+        let threshold: CGFloat = 64
+        let predicted = value.predictedEndTranslation.width
+        let translation = value.translation.width
+        let shouldGoNext = translation < -threshold || predicted < -threshold * 1.45
+        let shouldGoPrevious = translation > threshold || predicted > threshold * 1.45
+
+        guard shouldGoNext || shouldGoPrevious else {
+            UIImpactFeedbackGenerator(style: .soft).impactOccurred(intensity: 0.32)
+            withAnimation(.smooth(duration: 0.16, extraBounce: 0.0)) {
+                committedArtworkOffset = 0
+                isTextVisible = true
+            }
+            return
+        }
+
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred(intensity: 0.58)
+        let direction: CGFloat = shouldGoNext ? -1 : 1
+        withAnimation(.easeOut(duration: 0.12)) {
+            committedArtworkOffset = direction * 96
+            isTextVisible = false
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+            if shouldGoNext {
+                onNext()
+            } else {
+                onPrevious()
+            }
+            committedArtworkOffset = -direction * 42
+            withAnimation(.smooth(duration: 0.18, extraBounce: 0.0)) {
+                committedArtworkOffset = 0
+                isTextVisible = true
+            }
+        }
+    }
+}
+
+private struct PlayerPillGlassBackground: View {
+    let song: DemoSong
+    let isActive: Bool
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 27, style: .continuous)
+            .fill(.ultraThinMaterial)
+            .opacity(0.20)
+            .overlay {
+                RoundedRectangle(cornerRadius: 27, style: .continuous)
+                    .fill(.black.opacity(0.36))
+            }
+            .overlay {
+                LinearGradient(
+                    colors: [
+                        .white.opacity(0.055),
+                        .white.opacity(0.018),
+                        .black.opacity(0.10),
+                        song.magicColor.opacity(0.05)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+                .blendMode(.screen)
+            }
+            .overlay {
+                LinearGradient(
+                    stops: [
+                        .init(color: .white.opacity(0.14), location: 0.00),
+                        .init(color: .white.opacity(0.025), location: 0.22),
+                        .init(color: song.magicColor.opacity(isActive ? 0.10 : 0.07), location: 0.58),
+                        .init(color: song.magicColor.opacity(isActive ? 0.16 : 0.10), location: 0.82),
+                        .init(color: .black.opacity(0.08), location: 1.00)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+                .blendMode(.screen)
+            }
+            .overlay(alignment: .top) {
+                Capsule()
+                    .fill(
+                        LinearGradient(
+                            colors: [
+                                .white.opacity(0.24),
+                                .white.opacity(0.08),
+                                .clear
+                            ],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
+                    .frame(height: 1.6)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 1.5)
+                    .blur(radius: 0.25)
+            }
+            .overlay(alignment: .topLeading) {
+                Capsule()
+                    .fill(.white.opacity(0.14))
+                    .frame(width: 88, height: 20)
+                    .rotationEffect(.degrees(-14))
+                    .offset(x: 22, y: 8)
+                    .blur(radius: 9)
+                    .blendMode(.screen)
+            }
+            .overlay(alignment: .bottomTrailing) {
+                Capsule()
+                    .fill(song.magicColor.opacity(0.14))
+                    .frame(width: 136, height: 26)
+                    .rotationEffect(.degrees(-12))
+                    .offset(x: -24, y: -7)
+                    .blur(radius: 13)
+                    .blendMode(.screen)
+            }
+            .overlay(alignment: .leading) {
+                Capsule()
+                    .fill(song.magicColor.opacity(0.08))
+                    .frame(width: 90, height: 38)
+                    .offset(x: -26)
+                    .blur(radius: 18)
+                    .blendMode(.screen)
+            }
+    }
+}
+
+private struct PlayerPillGlassAura: View {
+    let song: DemoSong
+    let isActive: Bool
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 27, style: .continuous)
+                .stroke(.white.opacity(isActive ? 0.16 : 0.10), lineWidth: 2)
+                .blur(radius: 8)
+                .opacity(0.82)
+
+            RoundedRectangle(cornerRadius: 27, style: .continuous)
+                .stroke(song.magicColor.opacity(isActive ? 0.24 : 0.16), lineWidth: 7)
+                .blur(radius: 18)
+                .opacity(0.64)
+
+            RoundedRectangle(cornerRadius: 27, style: .continuous)
+                .stroke(song.magicColor.opacity(isActive ? 0.12 : 0.08), lineWidth: 12)
+                .blur(radius: 28)
+                .opacity(0.55)
+        }
+        .padding(-8)
+        .allowsHitTesting(false)
+    }
+}
+
+private struct PlayerPillSongText: View {
+    let song: DemoSong
+    let isPlaying: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(isPlaying ? song.title : "FlipMusic")
+                .font(.system(size: 14, weight: .bold))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+                .minimumScaleFactor(0.68)
+
+            Text(isPlaying ? song.artist : "A simple way to listen music")
+                .font(.system(size: isPlaying ? 12 : 11, weight: .medium))
+                .foregroundStyle(.white.opacity(0.82))
+                .lineLimit(1)
+                .minimumScaleFactor(0.58)
+        }
     }
 }
 
@@ -3090,9 +4578,9 @@ private extension View {
     func liquidGlassSurface(cornerRadius: CGFloat, isInteractive: Bool) -> some View {
         if #available(iOS 26.0, *) {
             if isInteractive {
-                self.glassEffect(.regular.tint(.white.opacity(0.14)).interactive(), in: .rect(cornerRadius: cornerRadius))
+                self.glassEffect(.regular.tint(.black.opacity(0.18)).interactive(), in: .rect(cornerRadius: cornerRadius))
             } else {
-                self.glassEffect(.regular.tint(.white.opacity(0.10)), in: .rect(cornerRadius: cornerRadius))
+                self.glassEffect(.regular.tint(.white.opacity(0.055)), in: .rect(cornerRadius: cornerRadius))
             }
         } else {
             self.background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: cornerRadius))
@@ -3251,15 +4739,15 @@ private struct BottomGlassFade: View {
             ZStack {
                 Rectangle()
                     .fill(.ultraThinMaterial)
-                    .opacity(0.78)
+                    .opacity(0.52)
                     .mask(
                         LinearGradient(
                             colors: [
                                 .clear,
-                                .black.opacity(0.22),
-                                .black.opacity(0.58),
-                                .black.opacity(0.86),
-                                .black
+                                .black.opacity(0.10),
+                                .black.opacity(0.30),
+                                .black.opacity(0.48),
+                                .black.opacity(0.62)
                             ],
                             startPoint: .top,
                             endPoint: .bottom
@@ -3269,12 +4757,12 @@ private struct BottomGlassFade: View {
                 LinearGradient(
                     colors: [
                         background.opacity(0.0),
-                        background.opacity(0.12),
-                        background.opacity(0.30),
-                        background.opacity(0.54),
-                        background.opacity(0.78),
-                        background.opacity(0.94),
-                        background
+                        background.opacity(0.06),
+                        background.opacity(0.15),
+                        background.opacity(0.26),
+                        background.opacity(0.38),
+                        background.opacity(0.50),
+                        background.opacity(0.58)
                     ],
                     startPoint: .top,
                     endPoint: .bottom
@@ -3449,6 +4937,7 @@ private struct ITunesTrack: Decodable {
     let trackName: String
     let artistName: String
     let artworkURL100: String?
+    let releaseDate: Date?
 
     private enum CodingKeys: String, CodingKey {
         case trackID = "trackId"
@@ -3457,6 +4946,7 @@ private struct ITunesTrack: Decodable {
         case name
         case artistName
         case artworkURL100 = "artworkUrl100"
+        case releaseDate
     }
 
     init(from decoder: Decoder) throws {
@@ -3475,6 +4965,29 @@ private struct ITunesTrack: Decodable {
         }
         artistName = try container.decode(String.self, forKey: .artistName)
         artworkURL100 = try container.decodeIfPresent(String.self, forKey: .artworkURL100)
+        if let releaseDateString = try container.decodeIfPresent(String.self, forKey: .releaseDate) {
+            releaseDate = ISO8601DateFormatter().date(from: releaseDateString)
+        } else {
+            releaseDate = nil
+        }
+    }
+}
+
+private extension Array where Element == ITunesTrack {
+    var prioritizingRecentReleases: [ITunesTrack] {
+        sorted { lhs, rhs in
+            switch (lhs.releaseDate, rhs.releaseDate) {
+            case let (lhsDate?, rhsDate?):
+                if lhsDate == rhsDate { return lhs.trackName < rhs.trackName }
+                return lhsDate > rhsDate
+            case (_?, nil):
+                return true
+            case (nil, _?):
+                return false
+            case (nil, nil):
+                return lhs.trackName < rhs.trackName
+            }
+        }
     }
 }
 
@@ -3526,6 +5039,34 @@ private struct DemoSong: Identifiable {
 
     var isPlayable: Bool {
         mediaItem != nil || storeID != nil
+    }
+
+    var isPlaceholder: Bool {
+        source == .placeholder
+    }
+
+    var rhythmEnergy: Double {
+        let text = "\(title) \(artist)".lowercased()
+        let fastWords = [
+            "dance", "rush", "club", "party", "desire", "kiss", "greedy", "hot",
+            "energy", "run", "move", "night", "pop", "beat", "speed", "jump"
+        ]
+        let slowWords = [
+            "slow", "sleep", "dream", "tears", "ocean", "eyes", "flower",
+            "ballad", "blue", "alone", "sad", "soft", "quiet"
+        ]
+        let keywordBoost = fastWords.contains { text.contains($0) } ? 0.22 : 0
+        let slowPenalty = slowWords.contains { text.contains($0) } ? 0.16 : 0
+        let colorEnergy = colors.reduce(0.0) { partial, color in
+            let resolved = color.resolve(in: EnvironmentValues())
+            let red = Double(resolved.red)
+            let green = Double(resolved.green)
+            let blue = Double(resolved.blue)
+            let brightness = max(red, green, blue)
+            let saturation = brightness == 0 ? 0 : (brightness - min(red, green, blue)) / brightness
+            return partial + brightness * 0.36 + saturation * 0.44
+        } / Double(max(colors.count, 1))
+        return min(max(0.28 + colorEnergy + keywordBoost - slowPenalty, 0.18), 1.0)
     }
 
     static func placeholder(id: Int, colors: [Color]) -> DemoSong {
@@ -3596,6 +5137,7 @@ private enum DemoSongSource {
     case demo
     case library
     case recommendation
+    case spotify
     case placeholder
 }
 
