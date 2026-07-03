@@ -37,7 +37,9 @@ struct ContentView: View {
     @State private var homeLoadMorePage = 0
     @State private var temporarilySkippedHomeSongIDs: [Int] = []
     @State private var pendingHomePlaybackTask: Task<Void, Never>?
+    @State private var currentTimeMood = HomeTimeMood.current
     @StateObject private var shakeObserver = ShakeMotionObserver()
+    private let timeMoodTimer = Timer.publish(every: 300, on: .main, in: .common).autoconnect()
     @State private var homeIdleTask: Task<Void, Never>?
     @State private var homeFlipTask: Task<Void, Never>?
     @Namespace private var playerExpansionNamespace
@@ -143,7 +145,7 @@ struct ContentView: View {
                     if musicConnector.isPlaying {
                         HeaderNowPlayingBadge(song: nowPlaying)
                     } else {
-                        GreetingBadge()
+                        GreetingBadge(mood: currentTimeMood)
                     }
                     Spacer()
                     TopSettingsButton {
@@ -260,6 +262,9 @@ struct ContentView: View {
         .onReceive(shakeObserver.$shakeEventID.dropFirst()) { _ in
             reshuffleHomeSongsWithFlip()
         }
+        .onReceive(timeMoodTimer) { _ in
+            updateTimeMoodIfNeeded()
+        }
     }
 
     private func playHomeSong(_ song: DemoSong) {
@@ -317,6 +322,14 @@ struct ContentView: View {
             }
         }
         return nil
+    }
+
+    private func updateTimeMoodIfNeeded() {
+        let latestMood = HomeTimeMood.current
+        guard latestMood != currentTimeMood else { return }
+        currentTimeMood = latestMood
+        musicConnector.refreshRecommendationsForCurrentTime()
+        syncHomeSongsIfNeeded(force: true)
     }
 
     private func showPlayerCard() {
@@ -661,7 +674,7 @@ private struct HomeFlipVariation {
     static let zero = HomeFlipVariation(delay: 0, durationScale: 1, tilt: 0, lift: 0)
 }
 
-private enum HomeTimeMood {
+private enum HomeTimeMood: Equatable {
     case morning
     case afternoon
     case evening
@@ -692,6 +705,15 @@ private enum HomeTimeMood {
         case .afternoon: return "☀️"
         case .evening: return "🌙"
         case .lateNight: return "✨"
+        }
+    }
+
+    var recommendationLabel: String {
+        switch self {
+        case .morning: return "早晨"
+        case .afternoon: return "下午"
+        case .evening: return "夜晚"
+        case .lateNight: return "深夜"
         }
     }
 
@@ -743,7 +765,7 @@ private enum HomeTimeMood {
 }
 
 private struct GreetingBadge: View {
-    private let mood = HomeTimeMood.current
+    let mood: HomeTimeMood
 
     var body: some View {
         TimelineView(.animation) { timeline in
@@ -1192,6 +1214,7 @@ private final class MusicConnectionManager: ObservableObject {
     private let discoveryExtraSongLimit = 96
     private var nextPlaybackPrefetchPage = 1
     private var loadedPlaybackPrefetchPages = Set<Int>()
+    private var lastRecommendationMood: HomeTimeMood?
 
     var discoverySongs: [DemoSong] {
         let baseSongs = librarySongs.isEmpty ? DemoSong.library : librarySongs
@@ -1309,7 +1332,15 @@ private final class MusicConnectionManager: ObservableObject {
             recommendationTask?.cancel()
             recommendedSongs = []
             discoveryExtraSongs = []
+            lastRecommendationMood = nil
         }
+    }
+
+    func refreshRecommendationsForCurrentTime() {
+        guard aiRecommendationsEnabled else { return }
+        let mood = HomeTimeMood.current
+        guard lastRecommendationMood != mood else { return }
+        refreshRecommendations()
     }
 
     func loadMoreDiscoverySongs(page: Int) async -> [DemoSong] {
@@ -1893,6 +1924,7 @@ private final class MusicConnectionManager: ObservableObject {
             discoveryExtraSongs = []
             nextPlaybackPrefetchPage = 1
             loadedPlaybackPrefetchPages.removeAll()
+            lastRecommendationMood = nil
             return
         }
         recommendationTask?.cancel()
@@ -1900,6 +1932,7 @@ private final class MusicConnectionManager: ObservableObject {
         discoveryExtraSongs = []
         nextPlaybackPrefetchPage = 1
         loadedPlaybackPrefetchPages.removeAll()
+        lastRecommendationMood = HomeTimeMood.current
 
         let seedSongs = Array((spotifySongs + (librarySongs.isEmpty ? DemoSong.library : librarySongs)).prefix(42))
         recommendationTask = Task { @MainActor in
@@ -1907,40 +1940,47 @@ private final class MusicConnectionManager: ObservableObject {
             guard !Task.isCancelled else { return }
             recommendedSongs = recommendations
             if recommendations.isEmpty == false {
-                message = "AI 已根据 \(seedSongs.count) 首歌推荐 \(recommendations.count) 首"
+                message = "AI 已根据\(HomeTimeMood.current.recommendationLabel)和 \(seedSongs.count) 首歌推荐 \(recommendations.count) 首"
             }
         }
     }
 
     private func fetchAppleCatalogRecommendations(from seedSongs: [DemoSong]) async -> [DemoSong] {
         let profile = musicTasteProfile(from: seedSongs)
+        let timeMoodSongs = await fetchAppleCatalogSongs(
+            queries: profile.moodQueries,
+            seedSongs: seedSongs,
+            maxCount: 18,
+            idBase: 190_000,
+            profile: profile
+        )
         let artistRadioSongs = await fetchAppleCatalogSongs(
             queries: artistRadioQueries(from: profile),
-            seedSongs: seedSongs,
+            seedSongs: seedSongs + timeMoodSongs,
             maxCount: 20,
             idBase: 200_000,
             profile: profile
         )
         let styleSongs = await fetchAppleCatalogSongs(
             queries: styleRecommendationQueries(from: profile),
-            seedSongs: seedSongs + artistRadioSongs,
+            seedSongs: seedSongs + timeMoodSongs + artistRadioSongs,
             maxCount: 24,
             idBase: 220_000,
             profile: profile
         )
         let latestSongs = await fetchAppleCatalogSongs(
             queries: latestReleaseQueries(from: profile),
-            seedSongs: seedSongs + artistRadioSongs + styleSongs,
+            seedSongs: seedSongs + timeMoodSongs + artistRadioSongs + styleSongs,
             maxCount: 24,
             idBase: 240_000,
             profile: profile
         )
         let chartSongs = await fetchAppleChartSongs(
-            seedSongs: seedSongs + artistRadioSongs + styleSongs + latestSongs,
+            seedSongs: seedSongs + timeMoodSongs + artistRadioSongs + styleSongs + latestSongs,
             maxCount: 18,
             profile: profile
         )
-        return Array(uniqueDiscoverySongs(from: artistRadioSongs + styleSongs + latestSongs + chartSongs).prefix(64))
+        return Array(uniqueDiscoverySongs(from: timeMoodSongs + artistRadioSongs + styleSongs + latestSongs + chartSongs).prefix(64))
     }
 
     private func fetchAppleChartSongs(
@@ -2041,45 +2081,7 @@ private final class MusicConnectionManager: ObservableObject {
         let profile = musicTasteProfile(
             from: Array((spotifySongs + librarySongs + recommendedSongs + DemoSong.library).prefix(56))
         )
-        let timeBased: [String]
-        switch HomeTimeMood.current {
-        case .morning:
-            timeBased = [
-                "morning acoustic pop",
-                "sunny morning songs",
-                "coffeehouse pop",
-                "fresh start playlist",
-                "bright indie pop",
-                "morning commute music"
-            ]
-        case .afternoon:
-            timeBased = [
-                "afternoon pop hits",
-                "workday energy songs",
-                "dance pop radio",
-                "feel good pop",
-                "today hits",
-                "new music daily"
-            ]
-        case .evening:
-            timeBased = [
-                "evening chill songs",
-                "night drive songs",
-                "cinematic pop",
-                "indie evening playlist",
-                "r&b favorites",
-                "soft rock essentials"
-            ]
-        case .lateNight:
-            timeBased = [
-                "late night songs",
-                "dream pop playlist",
-                "ambient pop",
-                "after dark r&b",
-                "sleepy indie",
-                "midnight drive music"
-            ]
-        }
+        let timeBased = profile.moodQueries
         let profileQueries = styleRecommendationQueries(from: profile) + artistRadioQueries(from: profile)
         let latestQueries = latestReleaseQueries(from: profile)
         let pool = (page % 2 == 0 ? timeBased + profileQueries + latestQueries : profileQueries + timeBased + latestQueries)
@@ -2089,29 +2091,39 @@ private final class MusicConnectionManager: ObservableObject {
 
     private struct MusicTasteProfile {
         let seedCount: Int
+        let timeMood: HomeTimeMood
         let topArtists: [String]
         let titleTokens: [String]
         let styleQueries: [String]
         let moodQueries: [String]
+        let moodPositiveTokens: [String]
+        let moodNegativeTokens: [String]
+        let moodGenreHints: [String]
         let seedRadioQueries: [String]
     }
 
     private func musicTasteProfile(from songs: [DemoSong]) -> MusicTasteProfile {
         let realSongs = songs.filter { !$0.isPlaceholder }
+        let mood = HomeTimeMood.current
         let artists = topArtists(from: realSongs, limit: 10)
         let titleTokens = weightedTokens(from: realSongs, limit: 12)
         let styleQueries = inferredTasteQueries(from: realSongs, titleTokens: titleTokens)
-        let moodQueries = moodQueriesForCurrentTime()
+        let moodQueries = moodQueries(for: mood)
+        let moodSignals = recommendationSignals(for: mood)
         let seedRadioQueries = realSongs.prefix(8).map { song in
             "\(song.title) \(song.artist) similar songs"
         }
 
         return MusicTasteProfile(
             seedCount: realSongs.count,
+            timeMood: mood,
             topArtists: artists,
             titleTokens: titleTokens,
             styleQueries: styleQueries,
             moodQueries: moodQueries,
+            moodPositiveTokens: moodSignals.positiveTokens,
+            moodNegativeTokens: moodSignals.negativeTokens,
+            moodGenreHints: moodSignals.genreHints,
             seedRadioQueries: seedRadioQueries
         )
     }
@@ -2205,16 +2217,75 @@ private final class MusicConnectionManager: ObservableObject {
         return uniqueQueries(queries)
     }
 
-    private func moodQueriesForCurrentTime() -> [String] {
-        switch HomeTimeMood.current {
+    private func moodQueries(for mood: HomeTimeMood) -> [String] {
+        switch mood {
         case .morning:
-            return ["morning music recommendations", "bright indie pop", "coffeehouse pop"]
+            return [
+                "morning acoustic pop",
+                "bright indie pop",
+                "coffeehouse pop",
+                "sunny morning songs",
+                "soft start songs",
+                "morning commute music"
+            ]
         case .afternoon:
-            return ["workday energy songs", "feel good pop", "today hits"]
+            return [
+                "workday energy songs",
+                "feel good pop",
+                "dance pop radio",
+                "afternoon pop hits",
+                "upbeat electronic pop",
+                "fresh today hits"
+            ]
         case .evening:
-            return ["evening chill songs", "night drive songs", "cinematic pop"]
+            return [
+                "evening chill songs",
+                "night drive songs",
+                "cinematic pop",
+                "alternative r&b evening",
+                "indie evening playlist",
+                "soft rock essentials"
+            ]
         case .lateNight:
-            return ["late night songs", "dream pop playlist", "after dark r&b"]
+            return [
+                "late night songs",
+                "dream pop playlist",
+                "after dark r&b",
+                "ambient pop",
+                "sleepy indie",
+                "midnight slow songs"
+            ]
+        }
+    }
+
+    private func recommendationSignals(
+        for mood: HomeTimeMood
+    ) -> (positiveTokens: [String], negativeTokens: [String], genreHints: [String]) {
+        switch mood {
+        case .morning:
+            return (
+                ["morning", "sun", "sunny", "bright", "gold", "easy", "sweet", "fresh", "coffee", "acoustic", "spring", "light"],
+                ["midnight", "dark", "after", "club", "party", "trap", "rage", "sleep", "sad"],
+                ["acoustic", "singer", "pop", "indie", "folk", "soundtrack"]
+            )
+        case .afternoon:
+            return (
+                ["dance", "energy", "hot", "rush", "run", "work", "move", "light", "today", "fresh", "club", "beat"],
+                ["sleep", "ambient", "slow", "lullaby", "alone", "sad", "dark"],
+                ["pop", "dance", "electronic", "hip-hop", "alternative"]
+            )
+        case .evening:
+            return (
+                ["night", "drive", "blue", "moon", "evening", "cinematic", "dream", "smooth", "soft", "cruel", "haze"],
+                ["morning", "coffee", "training", "workout", "kids", "holiday"],
+                ["r&b", "soul", "alternative", "soundtrack", "rock", "pop"]
+            )
+        case .lateNight:
+            return (
+                ["midnight", "late", "slow", "sleep", "dream", "dark", "after", "alone", "eyes", "ambient", "quiet"],
+                ["morning", "sunny", "party", "club", "hot", "rush", "workout", "dance"],
+                ["ambient", "r&b", "soul", "classical", "soundtrack", "indie"]
+            )
         }
     }
 
@@ -2300,6 +2371,15 @@ private final class MusicConnectionManager: ObservableObject {
         if seedArtists.contains(artist) == false { score += 1.5 }
         for token in tokens where searchable.contains(token) {
             score += 2.4
+        }
+        for token in profile.moodPositiveTokens where searchable.contains(token) {
+            score += 4.2
+        }
+        for token in profile.moodNegativeTokens where searchable.contains(token) {
+            score -= 4.8
+        }
+        for hint in profile.moodGenreHints where genre.contains(hint) {
+            score += 2.6
         }
         for query in profile.styleQueries where searchable.contains(query.components(separatedBy: " ").first ?? query) {
             score += 1.2
