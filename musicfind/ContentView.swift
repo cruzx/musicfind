@@ -28,7 +28,6 @@ struct ContentView: View {
     @State private var homeDriftAmount: CGFloat = 0
     @State private var homeSongs: [DemoSong] = []
     @State private var homePendingSongs: [DemoSong] = []
-    @State private var homeFlipProgressByID: [Int: CGFloat] = [:]
     @State private var homeFlipVariations: [Int: HomeFlipVariation] = [:]
     @State private var isHomeFlipping = false
     @State private var homeFlipGeneration = UUID()
@@ -85,7 +84,8 @@ struct ContentView: View {
                                     displayedSong: slot.song,
                                     isPlaying: slot.song.id == nowPlaying.id,
                                     gravity: homeCoverGravity(for: slot, columnCount: homeColumnCount),
-                                    progress: homeFlipLocalProgress(for: slot),
+                                    isFlipping: isHomeFlipping,
+                                    flipGeneration: homeFlipGeneration,
                                     variation: homeFlipVariations[slot.id] ?? .zero,
                                     onTap: {
                                         playHomeSong(slot.song)
@@ -149,10 +149,7 @@ struct ContentView: View {
                     if musicConnector.isPlaying {
                         HeaderNowPlayingBadge(song: nowPlaying)
                     } else {
-                        VStack(alignment: .leading, spacing: 8) {
-                            GreetingBadge(mood: currentTimeMood)
-                            TimeMoodCapsule(mood: currentTimeMood, preference: musicConnector.moodPreference)
-                        }
+                        GreetingBadge(mood: currentTimeMood)
                     }
                     Spacer()
                     TopSettingsButton {
@@ -268,7 +265,10 @@ struct ContentView: View {
         }
         .onChange(of: songs.map(\.id)) { _, _ in
             guard isHomeAppendingMore == false else { return }
-            syncHomeSongsIfNeeded(force: true)
+            syncHomeSongsIfNeeded()
+        }
+        .onChange(of: songs.map { "\($0.id):\($0.artworkImage != nil)" }) { _, _ in
+            refreshVisibleHomeSongMetadata()
         }
         .onReceive(shakeObserver.$shakeEventID.dropFirst()) { _ in
             reshuffleHomeSongsWithFlip()
@@ -301,10 +301,10 @@ struct ContentView: View {
         let playableSongs = visibleHomeSongs.filter { $0.isPlayable && $0.isPlaceholder == false }
         guard playableSongs.isEmpty == false else { return [song] }
         guard let selectedIndex = playableSongs.firstIndex(where: { $0.id == song.id }) else {
-            return Array(([song] + playableSongs).prefix(5))
+            return Array(([song] + playableSongs).prefix(24))
         }
         let rotatedSongs = Array(playableSongs[selectedIndex...]) + Array(playableSongs[..<selectedIndex])
-        return Array(rotatedSongs.prefix(5))
+        return Array(rotatedSongs.prefix(24))
     }
 
     private func toggleCurrentPlayback() {
@@ -360,24 +360,12 @@ struct ContentView: View {
 
     private func homeCoverGravity(for slot: HomeSongSlot, columnCount: Int) -> HomeCoverGravity {
         guard musicConnector.isPlaying || musicConnector.isPlaybackTransitioning,
-              let playingIndex = visibleHomeSongs.firstIndex(where: { $0.id == nowPlaying.id }) else {
+              visibleHomeSongs.contains(where: { $0.id == nowPlaying.id }) else {
             return .zero
         }
 
-        let playingRow = playingIndex / columnCount
-        let playingColumn = playingIndex % columnCount
         let relation = coverRelationScore(slot.song, to: nowPlaying)
-        let dx = CGFloat(playingColumn - slot.column)
-        let dy = CGFloat(playingRow - slot.row)
-        let length = max(1, sqrt(dx * dx + dy * dy))
-        let polarity: CGFloat = relation > 0.42 ? 1 : -0.58
-        let strength = slot.song.id == nowPlaying.id ? 1 : min(1, max(0.16, relation))
-        let offset = CGSize(
-            width: dx / length * strength * polarity * 7.5,
-            height: dy / length * strength * polarity * 7.5
-        )
-        let scale = slot.song.id == nowPlaying.id ? 1.07 : 1 + max(0, relation - 0.46) * 0.035
-        return HomeCoverGravity(offset: offset, scale: scale, glow: relation)
+        return HomeCoverGravity(offset: .zero, scale: 1, glow: relation)
     }
 
     private func coverRelationScore(_ song: DemoSong, to target: DemoSong) -> CGFloat {
@@ -398,7 +386,6 @@ struct ContentView: View {
         guard latestMood != currentTimeMood else { return }
         currentTimeMood = latestMood
         musicConnector.refreshRecommendationsForCurrentTime()
-        syncHomeSongsIfNeeded(force: true)
     }
 
     private func showPlayerCard() {
@@ -453,26 +440,68 @@ struct ContentView: View {
     }
 
     private func displayedHomeSong(at index: Int) -> DemoSong {
-        let slot = HomeSongSlot(id: index, row: index / 4, column: index % 4, song: visibleHomeSongs[index])
-        let localProgress = homeFlipLocalProgress(for: slot)
-        if isHomeFlipping, localProgress >= 0.5, homePendingSongs.indices.contains(index) {
-            return homePendingSongs[index]
-        }
         return visibleHomeSongs[index]
     }
 
-    private func homeFlipLocalProgress(for slot: HomeSongSlot) -> CGFloat {
-        guard isHomeFlipping else { return 0 }
-        return min(max(homeFlipProgressByID[slot.id] ?? 0, 0), 1)
+    private func syncHomeSongsIfNeeded() {
+        if homeSongs.isEmpty {
+            homeSongs = initialHomeSongs()
+            PlayerArtworkWarmupCache.shared.preload(songs: Array(homeSongs.prefix(80)))
+            resetHomeFlipState()
+            return
+        }
+
+        refreshVisibleHomeSongMetadata()
+        appendNewHomeSongsFromSource()
     }
 
-    private func syncHomeSongsIfNeeded(force: Bool = false) {
-        let currentIDs = homeSongs.map(\.id)
-        let sourceIDs = songs.map(\.id)
-        if force || currentIDs.sorted() != sourceIDs.sorted() {
-            homeSongs = initialHomeSongs()
-            resetHomeFlipState()
+    private func refreshVisibleHomeSongMetadata() {
+        guard homeSongs.isEmpty == false else { return }
+        var latestByID: [Int: DemoSong] = [:]
+        songs.forEach { latestByID[$0.id] = $0 }
+
+        let refreshedSongs = homeSongs.map { song in
+            guard let latestSong = latestByID[song.id] else { return song }
+            return mergedHomeSong(current: song, latest: latestSong)
         }
+        let refreshedPendingSongs = homePendingSongs.map { song in
+            guard let latestSong = latestByID[song.id] else { return song }
+            return mergedHomeSong(current: song, latest: latestSong)
+        }
+
+        guard refreshedSongs.map(\.id) == homeSongs.map(\.id) else { return }
+        homeSongs = refreshedSongs
+        homePendingSongs = refreshedPendingSongs
+        PlayerArtworkWarmupCache.shared.preload(songs: Array((refreshedSongs + refreshedPendingSongs).prefix(120)))
+    }
+
+    private func mergedHomeSong(current: DemoSong, latest: DemoSong) -> DemoSong {
+        let artworkImage = latest.artworkImage ?? current.artworkImage
+        let backdropImage = latest.backdropImage ?? current.backdropImage ?? artworkImage?.playerBackdropImage
+        return DemoSong(
+            id: latest.id,
+            title: latest.title,
+            artist: latest.artist,
+            colors: latest.artworkImage == nil ? current.colors : latest.colors,
+            mediaItem: latest.mediaItem ?? current.mediaItem,
+            storeID: latest.storeID ?? current.storeID,
+            artworkImage: artworkImage,
+            backdropImage: backdropImage,
+            lyricsText: latest.lyricsText ?? current.lyricsText,
+            magicColor: latest.artworkImage == nil ? current.magicColor : latest.magicColor,
+            source: latest.source
+        )
+    }
+
+    private func appendNewHomeSongsFromSource() {
+        guard homeSongs.isEmpty == false, isHomeFlipping == false else { return }
+        var seenIDs = Set(homeSongs.map(\.id))
+        let additions = songs.filter { song in
+            guard seenIDs.contains(song.id) == false else { return false }
+            seenIDs.insert(song.id)
+            return true
+        }
+        appendHomeSongsWithoutFlip(additions)
     }
 
     private func loadMoreHomeSongsIfNeeded(_ slot: HomeSongSlot) {
@@ -494,98 +523,88 @@ struct ContentView: View {
     }
 
     private func appendLoadedHomeSongs(_ additions: [DemoSong]) {
-        guard additions.isEmpty == false else {
+        let appendedCount = appendHomeSongsWithoutFlip(additions)
+        guard appendedCount > 0 else {
             isHomeLoadingMore = false
             isHomeAppendingMore = false
             return
         }
 
-        let current = homeSongs.isEmpty ? songs : homeSongs
-        let startIndex = current.count
-        let targetSongs = current + additions
-        homeSongs = targetSongs
-        homePendingSongs = targetSongs
-        homeFlipVariations = makeHomeFlipVariations(count: targetSongs.count)
-
-        var progress = Dictionary(uniqueKeysWithValues: targetSongs.indices.map { ($0, CGFloat(1)) })
-        for index in startIndex..<targetSongs.count {
-            progress[index] = 0
-        }
-        homeFlipProgressByID = progress
-
         let generation = UUID()
         homeFlipGeneration = generation
-        isHomeFlipping = true
+        isHomeFlipping = false
 
         homeFlipTask = Task { @MainActor in
-            let generator = UIImpactFeedbackGenerator(style: .light)
-            generator.prepare()
-            for index in startIndex..<targetSongs.count {
-                let row = index / 4
-                let column = index % 4
-                let stagger = (row - startIndex / 4) * 76 + [38, 8, 58, 22][column] + Int.random(in: 0...60)
-                Task { @MainActor in
-                    try? await Task.sleep(for: .milliseconds(max(0, stagger)))
-                    guard !Task.isCancelled, isHomeFlipping, homeFlipGeneration == generation else { return }
-                    generator.impactOccurred(intensity: 0.28)
-                    withAnimation(.interactiveSpring(response: 0.34, dampingFraction: 0.82, blendDuration: 0.02)) {
-                        homeFlipProgressByID[index] = 1
-                    }
-                }
-            }
-
-            let rows = max(1, Int(ceil(Double(additions.count) / 4.0)))
-            try? await Task.sleep(for: .milliseconds(rows * 82 + 520))
+            let rows = max(1, Int(ceil(Double(appendedCount) / 4.0)))
+            try? await Task.sleep(for: .milliseconds(rows * 42 + 220))
             guard !Task.isCancelled, homeFlipGeneration == generation else { return }
-            resetHomeFlipState()
             isHomeLoadingMore = false
             isHomeAppendingMore = false
         }
     }
 
+    @discardableResult
+    private func appendHomeSongsWithoutFlip(_ additions: [DemoSong]) -> Int {
+        guard additions.isEmpty == false else { return 0 }
+        let current = homeSongs.isEmpty ? songs : homeSongs
+        var seenIDs = Set(current.map(\.id))
+        let uniqueAdditions = additions.filter { song in
+            guard seenIDs.contains(song.id) == false else { return false }
+            seenIDs.insert(song.id)
+            return true
+        }
+        guard uniqueAdditions.isEmpty == false else { return 0 }
+
+        let targetSongs = current + uniqueAdditions
+        homeSongs = targetSongs
+        homePendingSongs = targetSongs
+        homeFlipVariations = makeHomeFlipVariations(count: targetSongs.count)
+        isHomeFlipping = false
+        PlayerArtworkWarmupCache.shared.preload(songs: Array(uniqueAdditions.prefix(80)))
+        return uniqueAdditions.count
+    }
+
     private func reshuffleHomeSongsWithFlip() {
         guard isHomeSurfaceVisible, songs.count > 1 else { return }
-        registerHomeInteraction()
+        registerHomeInteraction(resetDrift: false)
         resetHomeFlipState()
         rememberTemporarilySkippedHomeSongs(visibleHomeSongs.prefix(48).map(\.id))
 
         let nextSongs = reshuffledHomeSongs()
+        startHomeFlip(to: nextSongs, hapticStyle: .medium)
+    }
+
+    private func startHomeFlip(to nextSongs: [DemoSong], hapticStyle: UIImpactFeedbackGenerator.FeedbackStyle) {
+        guard nextSongs.isEmpty == false else { return }
+        resetHomeFlipState()
         homePendingSongs = nextSongs
         homeFlipVariations = makeHomeFlipVariations(count: nextSongs.count)
-        homeFlipProgressByID = Dictionary(uniqueKeysWithValues: nextSongs.indices.map { ($0, CGFloat(0)) })
         let generation = UUID()
         homeFlipGeneration = generation
         isHomeFlipping = true
+        PlayerArtworkWarmupCache.shared.preload(songs: Array(nextSongs.prefix(120)))
 
         homeFlipTask = Task { @MainActor in
-            let generator = UIImpactFeedbackGenerator(style: .medium)
+            let generator = UIImpactFeedbackGenerator(style: hapticStyle)
             generator.prepare()
 
             let timeline = nextSongs.indices.map { index -> (index: Int, startMs: Int, duration: Double) in
-                let row = index / 4
-                let column = index % 4
                 let variation = homeFlipVariations[index] ?? .zero
-                let rowBase = row * 92
-                let columnScatter = [52, 7, 86, 25][column]
-                let randomScatter = Int((variation.delay * 1000).rounded())
-                let startMs = max(0, rowBase + columnScatter + randomScatter)
+                let startMs = max(0, Int((variation.delay * 1000).rounded()))
                 let duration = Double(variation.durationScale) * 0.48
                 return (index, startMs, duration)
             }
 
-            for item in timeline {
-                Task { @MainActor in
-                    try? await Task.sleep(for: .milliseconds(item.startMs))
-                    guard !Task.isCancelled, isHomeFlipping, homeFlipGeneration == generation else { return }
-                    generator.impactOccurred(intensity: 0.52)
-                    withAnimation(.interactiveSpring(response: item.duration, dampingFraction: 0.78, blendDuration: 0.02)) {
-                        homeFlipProgressByID[item.index] = 1
-                    }
-                }
+            var lastStart = 0
+            for item in timeline.sorted(by: { $0.startMs < $1.startMs }) {
+                try? await Task.sleep(for: .milliseconds(max(0, item.startMs - lastStart)))
+                lastStart = item.startMs
+                guard !Task.isCancelled, isHomeFlipping, homeFlipGeneration == generation else { return }
+                generator.impactOccurred(intensity: 0.52)
             }
 
             let finalDelay = (timeline.map { $0.startMs }.max() ?? 0) + 760
-            try? await Task.sleep(for: .milliseconds(finalDelay))
+            try? await Task.sleep(for: .milliseconds(max(0, finalDelay - lastStart)))
             guard !Task.isCancelled, homeFlipGeneration == generation else { return }
             homeSongs = nextSongs
             resetHomeFlipState()
@@ -598,16 +617,20 @@ struct ContentView: View {
         homeFlipGeneration = UUID()
         homePendingSongs = []
         homeFlipVariations = [:]
-        homeFlipProgressByID = [:]
         isHomeFlipping = false
     }
 
     private func makeHomeFlipVariations(count: Int) -> [Int: HomeFlipVariation] {
         Dictionary(uniqueKeysWithValues: (0..<count).map { index in
-            (
+            let row = index / 4
+            let column = index % 4
+            let rowBase = row * 92
+            let columnScatter = [52, 7, 86, 25][column]
+            let randomScatter = Int.random(in: -20...170)
+            return (
                 index,
                 HomeFlipVariation(
-                    delay: CGFloat.random(in: -0.020...0.170),
+                    delay: CGFloat(max(0, rowBase + columnScatter + randomScatter)) / 1000,
                     durationScale: CGFloat.random(in: 0.72...1.48),
                     tilt: Double.random(in: -7...7),
                     lift: CGFloat.random(in: -5...6)
@@ -667,14 +690,14 @@ struct ContentView: View {
         temporarilySkippedHomeSongIDs = Array(capped)
     }
 
-    private func registerHomeInteraction() {
+    private func registerHomeInteraction(resetDrift: Bool = true) {
         guard isHomeSurfaceVisible else { return }
-        scheduleHomeIdleDrift()
+        scheduleHomeIdleDrift(resetDrift: resetDrift)
     }
 
-    private func scheduleHomeIdleDrift() {
+    private func scheduleHomeIdleDrift(resetDrift: Bool = true) {
         homeIdleTask?.cancel()
-        if homeDriftAmount != 0 {
+        if resetDrift, homeDriftAmount != 0 {
             withAnimation(.smooth(duration: 0.32, extraBounce: 0.0)) {
                 homeDriftAmount = 0
             }
@@ -713,9 +736,10 @@ struct ContentView: View {
 
     private func topOffset(for column: Int) -> CGFloat {
         switch column {
-        case 0: 18
-        case 2: 28
-        default: 0
+        case 0, 2:
+            return -18
+        default:
+            return 0
         }
     }
 
@@ -962,11 +986,6 @@ private struct TimeMoodCapsule: View {
         .frame(height: 28)
         .background(.black.opacity(0.26))
         .clipShape(Capsule())
-        .overlay {
-            Capsule()
-                .stroke(.white.opacity(0.12), lineWidth: 1)
-        }
-        .liquidGlassSurface(cornerRadius: 14, isInteractive: false)
     }
 }
 
@@ -1035,8 +1054,6 @@ private struct ProfilePage: View {
                     }
 
                     SourceSettingsPanel(connector: connector)
-
-                    MoodPalettePanel(connector: connector)
 
                     if let message = connector.message {
                         Text(message)
@@ -1115,8 +1132,6 @@ private struct SettingsModalView: View {
                     }
 
                     SourceSettingsPanel(connector: connector)
-
-                    MoodPalettePanel(connector: connector)
 
                     if let message = connector.message {
                         Text(message)
@@ -1342,108 +1357,6 @@ private struct SourceSettingsPanel: View {
     }
 }
 
-private struct MoodPalettePanel: View {
-    @ObservedObject var connector: MusicConnectionManager
-    @State private var dragHapticStep = 0
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Label("心情调色盘", systemImage: "circle.hexagongrid.fill")
-                    .font(.system(size: 14, weight: .black))
-                    .foregroundStyle(.white.opacity(0.88))
-
-                Spacer()
-
-                Text(connector.moodPreference.label)
-                    .font(.system(size: 12, weight: .bold))
-                    .foregroundStyle(connector.moodPreference.tint.opacity(0.92))
-            }
-
-            GeometryReader { proxy in
-                let size = proxy.size
-                let x = CGFloat((connector.moodPreference.energy + 1) / 2) * size.width
-                let y = CGFloat(1 - (connector.moodPreference.warmth + 1) / 2) * size.height
-
-                ZStack {
-                    RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .fill(
-                            LinearGradient(
-                                colors: [
-                                    Color(red: 0.20, green: 0.32, blue: 0.62),
-                                    Color(red: 0.92, green: 0.28, blue: 0.42)
-                                ],
-                                startPoint: .leading,
-                                endPoint: .trailing
-                            )
-                        )
-                        .overlay {
-                            LinearGradient(
-                                colors: [.white.opacity(0.28), .clear, .black.opacity(0.36)],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            )
-                        }
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                                .stroke(.white.opacity(0.12), lineWidth: 1)
-                        }
-
-                    Circle()
-                        .fill(connector.moodPreference.tint)
-                        .frame(width: 27, height: 27)
-                        .overlay {
-                            Circle()
-                                .stroke(.white.opacity(0.86), lineWidth: 2)
-                        }
-                        .shadow(color: connector.moodPreference.tint.opacity(0.70), radius: 14)
-                        .position(x: min(max(x, 14), size.width - 14), y: min(max(y, 14), size.height - 14))
-                }
-                .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                .gesture(
-                    DragGesture(minimumDistance: 0)
-                        .onChanged { value in
-                            updatePreference(at: value.location, in: size)
-                        }
-                        .onEnded { _ in
-                            dragHapticStep = 0
-                            UIImpactFeedbackGenerator(style: .medium).impactOccurred(intensity: 0.44)
-                        }
-                )
-            }
-            .frame(height: 86)
-
-            HStack {
-                Text("安静")
-                Spacer()
-                Text("兴奋")
-            }
-            .font(.system(size: 11, weight: .bold))
-            .foregroundStyle(.white.opacity(0.46))
-        }
-        .padding(14)
-        .background(.black.opacity(0.48))
-        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .stroke(.white.opacity(0.10), lineWidth: 1)
-        }
-    }
-
-    private func updatePreference(at location: CGPoint, in size: CGSize) {
-        guard size.width > 1, size.height > 1 else { return }
-        let energy = min(1, max(-1, Double(location.x / size.width) * 2 - 1))
-        let warmth = min(1, max(-1, (1 - Double(location.y / size.height)) * 2 - 1))
-        connector.updateMoodPreference(energy: energy, warmth: warmth)
-
-        let step = Int((abs(energy) + abs(warmth)) * 5)
-        if step != dragHapticStep {
-            dragHapticStep = step
-            UIImpactFeedbackGenerator(style: .soft).impactOccurred(intensity: 0.22 + CGFloat(step) * 0.025)
-        }
-    }
-}
-
 private struct MusicPlaylistOption: Identifiable, Hashable {
     static let allID = "all"
 
@@ -1491,12 +1404,14 @@ private final class MusicConnectionManager: ObservableObject {
     private let spotifyAuthenticator = SpotifyPKCEAuthenticator()
     private var playbackLoadingTask: Task<Void, Never>?
     private var queuedPlaybackTask: Task<Void, Never>?
-    private var playbackQueueWarmupTask: Task<Void, Never>?
     private var playbackPrefetchTask: Task<Void, Never>?
     private var recommendationTask: Task<Void, Never>?
     private var playbackObservers: [NSObjectProtocol] = []
     private var playbackRequestID = 0
-    private let playbackQueueLimit = 5
+    private var activePlaybackQueue: [DemoSong] = []
+    private var autoAdvanceTask: Task<Void, Never>?
+    private var shouldAutoAdvancePlayback = false
+    private let playbackQueueLimit = 24
     private let playbackPrefetchLimit = 8
     private let discoveryExtraSongLimit = 96
     private var nextPlaybackPrefetchPage = 1
@@ -1855,11 +1770,14 @@ private final class MusicConnectionManager: ObservableObject {
         }
         beginPlaybackLoading()
         queuedPlaybackTask?.cancel()
-        playbackQueueWarmupTask?.cancel()
+        autoAdvanceTask?.cancel()
+        autoAdvanceTask = nil
         playbackPrefetchTask?.cancel()
         playbackRequestID &+= 1
         let requestID = playbackRequestID
         let queueSnapshot = compactPlaybackQueueSnapshot(startingWith: song, in: queueSongs)
+        activePlaybackQueue = queueSnapshot
+        shouldAutoAdvancePlayback = true
         if playingSongID != song.id {
             playingSongID = song.id
         }
@@ -1887,6 +1805,9 @@ private final class MusicConnectionManager: ObservableObject {
         let player = MPMusicPlayerController.applicationMusicPlayer
         if player.playbackState == .playing, isPlayerCurrentlyOn(song, player: player) {
             player.pause()
+            autoAdvanceTask?.cancel()
+            autoAdvanceTask = nil
+            shouldAutoAdvancePlayback = false
             playingSongID = song.id
             currentSong = song
             isPlaying = false
@@ -1894,6 +1815,7 @@ private final class MusicConnectionManager: ObservableObject {
             message = "已暂停：\(song.title)"
         } else if isPlayerCurrentlyOn(song, player: player) {
             player.play()
+            shouldAutoAdvancePlayback = true
             playingSongID = song.id
             currentSong = song
             isPlaying = true
@@ -1940,6 +1862,8 @@ private final class MusicConnectionManager: ObservableObject {
         guard playbackObservers.isEmpty == false else { return }
         playbackObservers.forEach(NotificationCenter.default.removeObserver)
         playbackObservers = []
+        autoAdvanceTask?.cancel()
+        autoAdvanceTask = nil
         MPMusicPlayerController.applicationMusicPlayer.endGeneratingPlaybackNotifications()
     }
 
@@ -1982,8 +1906,10 @@ private final class MusicConnectionManager: ObservableObject {
 
     private func syncPlaybackState() {
         let player = MPMusicPlayerController.applicationMusicPlayer
-        isPlaying = player.playbackState == .playing
+        let playbackState = player.playbackState
+        isPlaying = playbackState == .playing
         guard let item = player.nowPlayingItem else {
+            handlePlaybackStoppedIfNeeded(player: player)
             return
         }
 
@@ -1995,6 +1921,40 @@ private final class MusicConnectionManager: ObservableObject {
             currentSong = fallback
             playingSongID = fallback.id
         }
+        if playbackState == .stopped {
+            handlePlaybackStoppedIfNeeded(player: player)
+        }
+    }
+
+    private func handlePlaybackStoppedIfNeeded(player: MPMusicPlayerController) {
+        guard shouldAutoAdvancePlayback, isPlaybackTransitioning == false else { return }
+        guard autoAdvanceTask == nil else { return }
+        guard let currentSong else { return }
+        guard let nextSong = nextSongAfterPlaybackStop(currentSong) else {
+            shouldAutoAdvancePlayback = false
+            return
+        }
+
+        autoAdvanceTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(280))
+            guard !Task.isCancelled, shouldAutoAdvancePlayback else { return }
+            guard player.playbackState == .stopped || player.playbackState == .paused else { return }
+            autoAdvanceTask = nil
+            queuePlayback(for: nextSong, in: activePlaybackQueue)
+        }
+    }
+
+    private func nextSongAfterPlaybackStop(_ song: DemoSong) -> DemoSong? {
+        let queue = activePlaybackQueue.isEmpty ? playbackQueueSongs(startingWith: song, in: nil) : activePlaybackQueue
+        let playableQueue = uniquePlayableSongs(from: queue)
+        guard playableQueue.count > 1 else { return nil }
+        let currentIndex = playableQueue.firstIndex(where: { candidate in
+            candidate.id == song.id ||
+            (candidate.storeID != nil && candidate.storeID == song.storeID) ||
+            (candidate.mediaItem?.persistentID != nil && candidate.mediaItem?.persistentID == song.mediaItem?.persistentID)
+        }) ?? 0
+        let nextIndex = (currentIndex + 1) % playableQueue.count
+        return playableQueue[nextIndex]
     }
 
     private func song(matching item: MPMediaItem) -> DemoSong? {
@@ -2050,7 +2010,7 @@ private final class MusicConnectionManager: ObservableObject {
     }
 
     private func setPlaybackQueue(on player: MPMusicPlayerController, startingWith song: DemoSong, in queueSongs: [DemoSong]?) {
-        prepareImmediatePlaybackQueue(on: player, startingWith: song)
+        prepareContinuousQueue(on: player, startingWith: song, in: queueSongs)
     }
 
     private func prepareAndStartPlayback(
@@ -2068,31 +2028,10 @@ private final class MusicConnectionManager: ObservableObject {
                     return
                 }
                 player.play()
-                self.scheduleContinuousQueueWarmup(startingWith: song, in: queueSongs, requestID: requestID)
                 self.schedulePlaybackPrefetch(startingWith: song, in: queueSongs, requestID: requestID)
                 self.endPlaybackLoading()
                 self.message = "正在播放：\(song.title)"
             }
-        }
-    }
-
-    private func prepareImmediatePlaybackQueue(on player: MPMusicPlayerController, startingWith song: DemoSong) {
-        if let mediaItem = song.mediaItem {
-            player.setQueue(with: MPMediaItemCollection(items: [mediaItem]))
-            player.nowPlayingItem = mediaItem
-        } else if let storeID = song.storeID {
-            player.setQueue(with: [storeID])
-        }
-    }
-
-    private func scheduleContinuousQueueWarmup(startingWith song: DemoSong, in queueSongs: [DemoSong]?, requestID: Int) {
-        playbackQueueWarmupTask?.cancel()
-
-        playbackQueueWarmupTask = Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(1200))
-            guard !Task.isCancelled, playbackRequestID == requestID, playingSongID == song.id, isPlaying else { return }
-            let player = MPMusicPlayerController.applicationMusicPlayer
-            prepareContinuousQueue(on: player, startingWith: song, in: queueSongs)
         }
     }
 
@@ -2130,16 +2069,17 @@ private final class MusicConnectionManager: ObservableObject {
     ) {
         let rotatedSongs = playbackQueueSongs(startingWith: song, in: queueSongs)
         guard rotatedSongs.isEmpty == false else { return }
+
+        let storeIDs = rotatedSongs.compactMap(\.storeID)
+        if let storeID = song.storeID, storeIDs.first == storeID {
+            player.setQueue(with: storeIDs)
+            return
+        }
+
         let items = rotatedSongs.compactMap(\.mediaItem)
         if let mediaItem = song.mediaItem {
             player.setQueue(with: MPMediaItemCollection(items: items.isEmpty ? [mediaItem] : items))
             player.nowPlayingItem = mediaItem
-            return
-        }
-
-        let storeIDs = rotatedSongs.compactMap(\.storeID)
-        if storeIDs.isEmpty == false, song.storeID != nil {
-            player.setQueue(with: storeIDs)
         }
     }
 
@@ -4799,7 +4739,7 @@ private final class PlayerArtworkWarmupCache {
     private var warmingIDs = Set<Int>()
 
     private init() {
-        artworkCache.countLimit = 80
+        artworkCache.countLimit = 240
     }
 
     func artwork(for song: DemoSong) -> UIImage? {
@@ -4939,31 +4879,29 @@ private struct PlayerPill: View {
         committedArtworkOffset + boundedDragOffset
     }
 
+    private var contentSwipeOffset: CGFloat {
+        artworkOffset * 0.55
+    }
+
     var body: some View {
         ZStack {
-            PlayerPillGlassBackground(song: song, isActive: isActive)
-
-            if let nextSong {
-                PlayerPillNextPeek(song: nextSong, reveal: min(1, max(0, abs(boundedDragOffset) / 76)))
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
-                    .padding(.trailing, 31)
-                    .opacity(isPlaybackLoading ? 0 : 1)
-            }
+            PlayerPillGlassBackground(song: song, isActive: isActive, isPlaying: isPlaying)
 
             HStack(spacing: 10) {
-                RotatingAlbumArt(song: song, isSpinning: isPlaying)
-                    .offset(x: artworkOffset)
-                    .opacity(max(0.18, 1 - abs(artworkOffset) / 92))
-                    .scaleEffect(1 - min(abs(artworkOffset) / 260, 0.10))
-                    .animation(.smooth(duration: 0.16, extraBounce: 0.0), value: committedArtworkOffset)
+                PlayerPillArtworkThumb(song: song, isSpinning: isPlaying)
+                    .opacity(isTextVisible ? max(0.22, 1 - abs(boundedDragOffset) / 120) : 0)
+                    .offset(x: contentSwipeOffset)
+                    .animation(.easeInOut(duration: 0.16), value: isTextVisible)
                     .animation(.smooth(duration: 0.12, extraBounce: 0.0), value: dragTranslation)
+                    .animation(.smooth(duration: 0.18, extraBounce: 0.0), value: committedArtworkOffset)
 
                 PlayerPillSongText(song: song, isPlaying: isPlaying, isLoading: isPlaybackLoading)
                     .id(song.id)
                     .opacity(isTextVisible ? max(0.18, 1 - abs(boundedDragOffset) / 120) : 0)
-                    .offset(x: boundedDragOffset * 0.18)
+                    .offset(x: contentSwipeOffset)
                     .animation(.easeInOut(duration: 0.16), value: isTextVisible)
                     .animation(.smooth(duration: 0.12, extraBounce: 0.0), value: dragTranslation)
+                    .animation(.smooth(duration: 0.18, extraBounce: 0.0), value: committedArtworkOffset)
                 .contentShape(Rectangle())
 
                 Spacer(minLength: 8)
@@ -4977,7 +4915,7 @@ private struct PlayerPill: View {
                 .buttonStyle(.plain)
                 .disabled(isPlaybackLoading)
             }
-            .padding(.leading, 11)
+            .padding(.leading, 13)
             .padding(.trailing, 12)
             .opacity(isPlayerCardVisible ? 0 : 1)
         }
@@ -4989,16 +4927,16 @@ private struct PlayerPill: View {
         .clipShape(RoundedRectangle(cornerRadius: 27))
         .overlay {
             RoundedRectangle(cornerRadius: 27)
-                .stroke(.white.opacity(isActive ? 0.18 : 0.10), lineWidth: 0.8)
+                .stroke(.white.opacity(isActive ? 0.12 : 0.065), lineWidth: 0.7)
         }
         .overlay {
             RoundedRectangle(cornerRadius: 27)
                 .stroke(
                     LinearGradient(
                         colors: [
-                            .white.opacity(0.30),
-                            .white.opacity(0.08),
-                            song.magicColor.opacity(0.14),
+                            .white.opacity(0.20),
+                            .white.opacity(0.05),
+                            song.magicColor.opacity(0.12),
                             .clear
                         ],
                         startPoint: .topLeading,
@@ -5038,7 +4976,7 @@ private struct PlayerPill: View {
             }
         }
         .shadow(color: .white.opacity(0.06), radius: 14, y: -5)
-        .shadow(color: song.magicColor.opacity(0.12), radius: 18, y: 6)
+        .shadow(color: song.magicColor.opacity(0.16), radius: 20, y: 6)
         .shadow(color: .black.opacity(0.18), radius: 18, y: 9)
         .contentShape(RoundedRectangle(cornerRadius: 27))
         .scaleEffect(isTouchActive ? 1.045 : 1)
@@ -5170,6 +5108,50 @@ private struct PlayerPill: View {
     }
 }
 
+private struct PlayerPillArtworkThumb: View {
+    let song: DemoSong
+    let isSpinning: Bool
+    @State private var rotation = 0.0
+
+    var body: some View {
+        ZStack {
+            LinearGradient(colors: song.colors, startPoint: .topLeading, endPoint: .bottomTrailing)
+
+            if let artworkImage = PlayerArtworkWarmupCache.shared.artwork(for: song) ?? song.artworkImage {
+                Image(uiImage: artworkImage)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+            }
+        }
+        .frame(width: 34, height: 34)
+        .clipShape(Circle())
+        .overlay {
+            Circle()
+                .stroke(.white.opacity(0.16), lineWidth: 1)
+        }
+        .rotationEffect(.degrees(rotation))
+        .onAppear {
+            updateRotation()
+        }
+        .onChange(of: isSpinning) { _, _ in
+            updateRotation()
+        }
+        .allowsHitTesting(false)
+    }
+
+    private func updateRotation() {
+        if isSpinning {
+            withAnimation(.linear(duration: 6).repeatForever(autoreverses: false)) {
+                rotation = 360
+            }
+        } else {
+            withAnimation(.easeOut(duration: 0.18)) {
+                rotation = 0
+            }
+        }
+    }
+}
+
 private struct PlayerPillTouchGlow: View {
     let song: DemoSong
     let location: CGPoint
@@ -5182,26 +5164,35 @@ private struct PlayerPillTouchGlow: View {
                 .fill(
                     RadialGradient(
                         colors: [
-                            .white.opacity(isActive ? 0.54 : 0.34),
-                            song.magicColor.opacity(isActive ? 0.30 : 0.22),
-                            .white.opacity(isActive ? 0.12 : 0.06),
+                            .white.opacity(isActive ? 0.34 : 0.22),
+                            song.magicColor.opacity(isActive ? 0.24 : 0.16),
+                            .white.opacity(isActive ? 0.08 : 0.04),
                             .clear
                         ],
                         center: .center,
                         startRadius: 0,
-                        endRadius: 74
+                        endRadius: 180
                     )
                 )
-                .frame(width: isActive ? 146 : 186, height: isActive ? 104 : 136)
-                .blur(radius: isActive ? 3 : 9)
-                .opacity((isActive || isReleasing) ? 1 : 0)
+                .frame(width: isActive ? 330 : 370, height: isActive ? 190 : 220)
+                .blur(radius: isActive ? 32 : 38)
+                .opacity((isActive || isReleasing) ? 0.92 : 0)
                 .position(location)
                 .blendMode(.screen)
 
-            Circle()
-                .stroke(.white.opacity(isActive ? 0.38 : 0.0), lineWidth: 1.1)
-                .frame(width: isActive ? 54 : 84, height: isActive ? 54 : 84)
-                .blur(radius: 1.2)
+            RadialGradient(
+                colors: [
+                    .white.opacity(isActive ? 0.055 : 0),
+                    song.magicColor.opacity(isActive ? 0.16 : 0),
+                    .clear
+                ],
+                center: .center,
+                startRadius: 20,
+                endRadius: 210
+            )
+                .frame(width: 380, height: 230)
+                .blur(radius: 44)
+                .opacity((isActive || isReleasing) ? 0.72 : 0)
                 .position(location)
                 .blendMode(.screen)
         }
@@ -5244,87 +5235,316 @@ private struct PlayerPillNextPeek: View {
 private struct PlayerPillGlassBackground: View {
     let song: DemoSong
     let isActive: Bool
+    let isPlaying: Bool
 
     var body: some View {
         RoundedRectangle(cornerRadius: 27, style: .continuous)
             .fill(.ultraThinMaterial)
-            .opacity(0.20)
+            .opacity(0.10)
             .overlay {
                 RoundedRectangle(cornerRadius: 27, style: .continuous)
-                    .fill(.black.opacity(0.36))
+                    .fill(
+                        LinearGradient(
+                            colors: [
+                                Color(red: 0.015, green: 0.018, blue: 0.026).opacity(0.74),
+                                Color(red: 0.006, green: 0.008, blue: 0.014).opacity(0.82),
+                                .black.opacity(0.78)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
             }
             .overlay {
                 LinearGradient(
                     colors: [
-                        .white.opacity(0.055),
                         .white.opacity(0.018),
-                        .black.opacity(0.10),
-                        song.magicColor.opacity(0.05)
+                        .clear,
+                        .black.opacity(0.22),
+                        song.magicColor.opacity(0.035)
                     ],
                     startPoint: .topLeading,
                     endPoint: .bottomTrailing
                 )
-                .blendMode(.screen)
+                .blendMode(.plusLighter)
             }
             .overlay {
                 LinearGradient(
                     stops: [
-                        .init(color: .white.opacity(0.14), location: 0.00),
-                        .init(color: .white.opacity(0.025), location: 0.22),
-                        .init(color: song.magicColor.opacity(isActive ? 0.10 : 0.07), location: 0.58),
-                        .init(color: song.magicColor.opacity(isActive ? 0.16 : 0.10), location: 0.82),
-                        .init(color: .black.opacity(0.08), location: 1.00)
+                        .init(color: .white.opacity(0.030), location: 0.00),
+                        .init(color: .white.opacity(0.006), location: 0.18),
+                        .init(color: song.magicColor.opacity(isActive ? 0.060 : 0.040), location: 0.64),
+                        .init(color: .black.opacity(0.18), location: 1.00)
                     ],
                     startPoint: .topLeading,
                     endPoint: .bottomTrailing
                 )
-                .blendMode(.screen)
+                .blendMode(.plusLighter)
             }
-            .overlay(alignment: .top) {
-                Capsule()
-                    .fill(
-                        LinearGradient(
-                            colors: [
-                                .white.opacity(0.24),
-                                .white.opacity(0.08),
-                                .clear
-                            ],
-                            startPoint: .leading,
-                            endPoint: .trailing
-                        )
+            .overlay {
+                ZStack {
+                    RadialGradient(
+                        colors: [
+                            .white.opacity(0.052),
+                            .white.opacity(0.014),
+                            .clear
+                        ],
+                        center: UnitPoint(x: 0.52, y: -0.08),
+                        startRadius: 0,
+                        endRadius: 170
                     )
-                    .frame(height: 1.6)
-                    .padding(.horizontal, 16)
-                    .padding(.top, 1.5)
-                    .blur(radius: 0.25)
+                    .blur(radius: 18)
+                    .blendMode(.plusLighter)
+
+                    RadialGradient(
+                        colors: [
+                            song.magicColor.opacity(isActive ? 0.115 : 0.080),
+                            song.magicColor.opacity(isActive ? 0.045 : 0.032),
+                            .clear
+                        ],
+                        center: UnitPoint(x: 0.50, y: 0.22),
+                        startRadius: 0,
+                        endRadius: 190
+                    )
+                    .blur(radius: 24)
+                    .blendMode(.plusLighter)
+                }
             }
             .overlay(alignment: .topLeading) {
-                Capsule()
-                    .fill(.white.opacity(0.14))
-                    .frame(width: 88, height: 20)
-                    .rotationEffect(.degrees(-14))
-                    .offset(x: 22, y: 8)
-                    .blur(radius: 9)
+                RadialGradient(
+                    colors: [
+                        .white.opacity(0.052),
+                        .white.opacity(0.016),
+                        .clear
+                    ],
+                    center: .center,
+                    startRadius: 18,
+                    endRadius: 150
+                )
+                    .frame(width: 250, height: 112)
+                    .offset(x: -50, y: -44)
+                    .blur(radius: 34)
                     .blendMode(.screen)
             }
             .overlay(alignment: .bottomTrailing) {
-                Capsule()
-                    .fill(song.magicColor.opacity(0.14))
-                    .frame(width: 136, height: 26)
-                    .rotationEffect(.degrees(-12))
-                    .offset(x: -24, y: -7)
-                    .blur(radius: 13)
+                RadialGradient(
+                    colors: [
+                        song.magicColor.opacity(0.125),
+                        song.magicColor.opacity(0.045),
+                        .clear
+                    ],
+                    center: .center,
+                    startRadius: 24,
+                    endRadius: 180
+                )
+                    .frame(width: 320, height: 140)
+                    .offset(x: 60, y: 40)
+                    .blur(radius: 42)
                     .blendMode(.screen)
             }
             .overlay(alignment: .leading) {
-                Capsule()
-                    .fill(song.magicColor.opacity(0.08))
-                    .frame(width: 90, height: 38)
-                    .offset(x: -26)
-                    .blur(radius: 18)
+                RadialGradient(
+                    colors: [
+                        song.magicColor.opacity(0.070),
+                        .clear
+                    ],
+                    center: .center,
+                    startRadius: 20,
+                    endRadius: 140
+                )
+                    .frame(width: 240, height: 130)
+                    .offset(x: -100)
+                    .blur(radius: 46)
                     .blendMode(.screen)
             }
+            .overlay(alignment: .bottom) {
+                PlayerPillRhythmLights(song: song, isPlaying: isPlaying)
+                    .clipShape(RoundedRectangle(cornerRadius: 27, style: .continuous))
+                    .allowsHitTesting(false)
+            }
     }
+}
+
+private struct PlayerPillRhythmLights: View {
+    let song: DemoSong
+    let isPlaying: Bool
+
+    private let bars = Array(0..<9)
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 20.0)) { timeline in
+            let fallbackTime = timeline.date.timeIntervalSinceReferenceDate
+            let playbackTime = currentPlaybackTime(fallbackTime: fallbackTime)
+            let bpm = playbackBPM(for: song)
+            let beatPosition = playbackTime * bpm / 60.0
+            let slidePosition = beatPosition * 0.18
+            GeometryReader { proxy in
+                let width = max(proxy.size.width, 1)
+                let height = max(proxy.size.height, 1)
+                let horizontalWave = sin(slidePosition * .pi * 2)
+                let verticalWave = sin(slidePosition * .pi * 2 - .pi / 3)
+                let secondaryWave = sin(slidePosition * .pi * 4 + .pi / 4)
+                let counterWave = sin(slidePosition * .pi * 2 + .pi * 0.82)
+                let ribbonWave = sin(slidePosition * .pi * 2 - .pi * 0.58)
+                let glowCenterX = 0.50 + CGFloat(horizontalWave) * 0.30
+                let glowCenterY = 0.82 - CGFloat(verticalWave) * 0.24
+                let counterCenterX = 0.50 + CGFloat(counterWave) * 0.24
+                let counterCenterY = 0.84 + CGFloat(ribbonWave) * 0.18
+
+                ZStack(alignment: .bottomLeading) {
+                    ForEach(bars, id: \.self) { index in
+                        let phaseA = randomPhase(index: index, salt: 0.13)
+                        let phaseB = randomPhase(index: index, salt: 0.47)
+                        let phaseC = randomPhase(index: index, salt: 0.79)
+                        let speedA = 0.62 + randomUnit(index: index, salt: 1.11) * 0.68
+                        let speedB = 0.88 + randomUnit(index: index, salt: 1.73) * 0.74
+                        let speedC = 0.48 + randomUnit(index: index, salt: 2.31) * 0.82
+                        let driftAmount = 0.016 + randomUnit(index: index, salt: 2.89) * 0.048
+                        let verticalAmount = 0.035 + randomUnit(index: index, salt: 3.37) * 0.070
+                        let lanePhase = slidePosition * .pi * 2 * speedA + phaseA
+                        let laneWave = sin(lanePhase)
+                        let laneSwell = sin(slidePosition * .pi * 2 * speedB + phaseB)
+                        let laneDrift = sin(slidePosition * .pi * 2 * speedC + phaseC)
+                        let x = width * (0.08 + CGFloat(index) * 0.105)
+                            + CGFloat(horizontalWave) * width * 0.075
+                            + CGFloat(laneDrift) * width * CGFloat(driftAmount)
+                        let glowHeight = height * (0.30 + CGFloat(laneWave + 1) * 0.10 + CGFloat(laneSwell + 1) * 0.035)
+                        let glowWidth = width * (0.145 + CGFloat(laneSwell + 1) * 0.025)
+                        let opacity = isPlaying ? (0.32 + CGFloat(laneWave + 1) * 0.035) : 0
+                        let verticalOffset = height * (
+                            0.47
+                            - CGFloat(verticalWave) * 0.17
+                            - CGFloat(laneWave) * CGFloat(verticalAmount)
+                            + CGFloat(laneDrift) * 0.040
+                        )
+
+                        Capsule()
+                            .fill(
+                                LinearGradient(
+                                    colors: [
+                                        .white.opacity(0.41),
+                                        song.magicColor.opacity(0.64),
+                                        song.magicColor.opacity(0.32),
+                                        .clear
+                                    ],
+                                    startPoint: .bottom,
+                                    endPoint: .top
+                                )
+                            )
+                            .frame(width: glowWidth, height: glowHeight)
+                            .blur(radius: 16)
+                            .opacity(opacity)
+                            .offset(x: x - glowWidth / 2, y: verticalOffset)
+                            .blendMode(.plusLighter)
+                    }
+
+                    Capsule()
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    .clear,
+                                    song.magicColor.opacity(isPlaying ? 0.28 : 0),
+                                    .white.opacity(isPlaying ? 0.13 : 0),
+                                    song.magicColor.opacity(isPlaying ? 0.18 : 0),
+                                    .clear
+                                ],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                        .frame(width: width * 0.68, height: height * 0.18)
+                        .rotationEffect(.degrees(-8 + ribbonWave * 5))
+                        .offset(
+                            x: width * (0.16 + CGFloat(horizontalWave) * 0.14),
+                            y: height * (0.50 + CGFloat(ribbonWave) * 0.14)
+                        )
+                        .blur(radius: 11)
+                        .blendMode(.plusLighter)
+                        .opacity(isPlaying ? 0.72 : 0)
+
+                    RadialGradient(
+                        colors: [
+                            .white.opacity(isPlaying ? 0.15 : 0),
+                            song.magicColor.opacity(isPlaying ? 0.36 : 0),
+                            song.magicColor.opacity(isPlaying ? 0.12 : 0),
+                            .clear
+                        ],
+                        center: UnitPoint(x: glowCenterX, y: glowCenterY),
+                        startRadius: 4,
+                        endRadius: width * (0.54 + CGFloat(secondaryWave + 1) * 0.06)
+                    )
+                    .frame(width: width, height: height * 0.92)
+                    .offset(y: height * 0.30)
+                    .blur(radius: 18)
+                    .blendMode(.plusLighter)
+                    .opacity(isPlaying ? 0.67 : 0)
+
+                    RadialGradient(
+                        colors: [
+                            song.magicColor.opacity(isPlaying ? 0.24 : 0),
+                            .white.opacity(isPlaying ? 0.10 : 0),
+                            .clear
+                        ],
+                        center: UnitPoint(x: counterCenterX, y: counterCenterY),
+                        startRadius: 2,
+                        endRadius: width * 0.38
+                    )
+                    .frame(width: width, height: height * 0.80)
+                    .offset(y: height * 0.24)
+                    .blur(radius: 15)
+                    .blendMode(.plusLighter)
+                    .opacity(isPlaying ? 0.54 : 0)
+
+                    RadialGradient(
+                        colors: [
+                            .white.opacity(isPlaying ? 0.19 : 0),
+                            song.magicColor.opacity(isPlaying ? 0.27 : 0),
+                            .clear
+                        ],
+                        center: UnitPoint(x: glowCenterX, y: glowCenterY),
+                        startRadius: 0,
+                        endRadius: width * 0.30
+                    )
+                    .frame(width: width, height: height * 0.86)
+                    .offset(y: height * 0.30)
+                    .blur(radius: 8)
+                    .blendMode(.plusLighter)
+                    .opacity(isPlaying ? 0.58 : 0)
+                }
+                .animation(.easeOut(duration: 0.24), value: isPlaying)
+            }
+        }
+    }
+
+    private func currentPlaybackTime(fallbackTime: TimeInterval) -> TimeInterval {
+        guard isPlaying else { return 0 }
+        let playbackTime = MPMusicPlayerController.applicationMusicPlayer.currentPlaybackTime
+        return playbackTime > 0 ? playbackTime : fallbackTime
+    }
+
+    private func playbackBPM(for song: DemoSong) -> Double {
+        let libraryBPM = song.mediaItem?.beatsPerMinute ?? 0
+        if libraryBPM > 0 {
+            return min(156, max(58, Double(libraryBPM)))
+        }
+        return estimatedBPM(for: song)
+    }
+
+    private func randomUnit(index: Int, salt: Double) -> Double {
+        let seed = (Double(index) + 1.0) * 12.9898 + Double(song.id) * 0.071 + salt * 78.233
+        let value = sin(seed) * 43758.5453
+        return value - floor(value)
+    }
+
+    private func randomPhase(index: Int, salt: Double) -> Double {
+        randomUnit(index: index, salt: salt) * .pi * 2
+    }
+
+    private func estimatedBPM(for song: DemoSong) -> Double {
+        let energy = min(1, max(0, song.rhythmEnergy))
+        return 54 + energy * 68
+    }
+
 }
 
 private struct PlayerPillGlassAura: View {
@@ -5385,37 +5605,37 @@ private struct PlayerPillSongText: View {
     let isLoading: Bool
 
     var body: some View {
-        ZStack(alignment: .leading) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(isPlaying ? song.title : "FlipMusic")
-                    .font(.system(size: 14, weight: .bold))
-                    .foregroundStyle(.white)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.68)
+        GeometryReader { proxy in
+            ZStack(alignment: .leading) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(isPlaying ? song.title : "FlipMusic")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.68)
 
-                Text(isPlaying ? song.artist : "A simple way to listen music")
-                    .font(.system(size: isPlaying ? 12 : 11, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.82))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.58)
-            }
-            .opacity(isLoading ? 0 : 1)
-            .scaleEffect(isLoading ? 0.98 : 1, anchor: .leading)
+                    Text(isPlaying ? song.artist : "A simple way to listen music")
+                        .font(.system(size: isPlaying ? 12 : 11, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.82))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.58)
+                }
+                .frame(width: proxy.size.width, height: proxy.size.height, alignment: .leading)
+                .opacity(isLoading ? 0 : 1)
+                .scaleEffect(isLoading ? 0.98 : 1, anchor: .leading)
 
-            VStack(alignment: .leading, spacing: 2) {
                 Text("歌曲加载中")
                     .font(.system(size: 14, weight: .bold))
                     .foregroundStyle(.white)
                     .lineLimit(1)
                     .minimumScaleFactor(0.74)
-
-                Text(" ")
-                    .font(.system(size: 12, weight: .medium))
-                    .lineLimit(1)
+                    .frame(width: proxy.size.width, height: proxy.size.height, alignment: .leading)
+                .opacity(isLoading ? 1 : 0)
+                .scaleEffect(isLoading ? 1 : 0.98, anchor: .center)
             }
-            .opacity(isLoading ? 1 : 0)
-            .scaleEffect(isLoading ? 1 : 0.98, anchor: .leading)
+            .frame(width: proxy.size.width, height: proxy.size.height, alignment: .leading)
         }
+        .frame(height: 53, alignment: .center)
         .animation(.easeInOut(duration: 0.18), value: isLoading)
         .animation(.easeInOut(duration: 0.18), value: isPlaying)
     }
@@ -5493,7 +5713,7 @@ private extension View {
     func liquidGlassSurface(cornerRadius: CGFloat, isInteractive: Bool) -> some View {
         if #available(iOS 26.0, *) {
             if isInteractive {
-                self.glassEffect(.regular.tint(.black.opacity(0.18)).interactive(), in: .rect(cornerRadius: cornerRadius))
+                self.glassEffect(.regular.tint(.black.opacity(0.24)).interactive(), in: .rect(cornerRadius: cornerRadius))
             } else {
                 self.glassEffect(.regular.tint(.white.opacity(0.055)), in: .rect(cornerRadius: cornerRadius))
             }
@@ -6065,7 +6285,8 @@ private struct HomeInteractiveSongSquare: View {
     let displayedSong: DemoSong
     let isPlaying: Bool
     let gravity: HomeCoverGravity
-    let progress: CGFloat
+    let isFlipping: Bool
+    let flipGeneration: UUID
     let variation: HomeFlipVariation
     let onTap: () -> Void
 
@@ -6075,7 +6296,8 @@ private struct HomeInteractiveSongSquare: View {
                 frontSong: frontSong,
                 backSong: backSong,
                 isPlaying: isPlaying,
-                progress: progress,
+                isFlipping: isFlipping,
+                flipGeneration: flipGeneration,
                 variation: variation
             )
             .contentShape(RoundedRectangle(cornerRadius: 8))
@@ -6106,7 +6328,7 @@ private struct SongSquare: View {
             ZStack {
                 LinearGradient(colors: song.colors, startPoint: .topLeading, endPoint: .bottomTrailing)
 
-                if let artworkImage = song.artworkImage {
+                if let artworkImage = PlayerArtworkWarmupCache.shared.artwork(for: song) ?? song.artworkImage {
                     Image(uiImage: artworkImage)
                         .resizable()
                         .aspectRatio(contentMode: .fill)
@@ -6118,8 +6340,49 @@ private struct SongSquare: View {
             .frame(width: side, height: side)
             .clipShape(RoundedRectangle(cornerRadius: 8))
             .overlay {
-                RoundedRectangle(cornerRadius: 8)
-                    .stroke(isPlaying ? .white.opacity(0.82) : .clear, lineWidth: 2)
+                if isPlaying {
+                    ZStack(alignment: .bottomLeading) {
+                        RadialGradient(
+                            colors: [
+                                song.magicColor.opacity(0.42),
+                                song.magicColor.opacity(0.16),
+                                .clear
+                            ],
+                            center: .bottomLeading,
+                            startRadius: 0,
+                            endRadius: side * 0.86
+                        )
+                        .blendMode(.screen)
+
+                        LinearGradient(
+                            colors: [
+                                .clear,
+                                .black.opacity(0.24)
+                            ],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                }
+            }
+            .overlay(alignment: .bottomLeading) {
+                if isPlaying {
+                    HStack(spacing: 2.5) {
+                        ForEach(0..<3, id: \.self) { index in
+                            Capsule()
+                                .fill(.white.opacity(0.78))
+                                .frame(width: 2.5, height: CGFloat([8, 13, 6][index]))
+                        }
+                    }
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 6)
+                    .background(.black.opacity(0.30))
+                    .clipShape(Capsule())
+                    .padding(7)
+                    .shadow(color: song.magicColor.opacity(0.28), radius: 8, y: 3)
+                    .transition(.opacity.combined(with: .scale(scale: 0.92, anchor: .bottomLeading)))
+                }
             }
         }
         .frame(maxWidth: .infinity)
@@ -6131,8 +6394,10 @@ private struct HomeFlipSongSquare: View {
     let frontSong: DemoSong
     let backSong: DemoSong
     let isPlaying: Bool
-    let progress: CGFloat
+    let isFlipping: Bool
+    let flipGeneration: UUID
     let variation: HomeFlipVariation
+    @State private var progress: CGFloat = 0
 
     var body: some View {
         ZStack {
@@ -6155,10 +6420,36 @@ private struct HomeFlipSongSquare: View {
         )
         .rotationEffect(.degrees(variation.tilt * sin(Double(progress) * .pi)))
         .offset(y: variation.lift * sin(CGFloat(progress) * .pi))
+        .task(id: flipGeneration) {
+            await runFlipIfNeeded()
+        }
+        .onChange(of: isFlipping) { _, newValue in
+            if newValue == false {
+                progress = 0
+            }
+        }
     }
 
     private var flipRotation: Double {
         Double(progress * 180)
+    }
+
+    @MainActor
+    private func runFlipIfNeeded() async {
+        guard isFlipping else {
+            progress = 0
+            return
+        }
+        progress = 0
+        let delayMs = max(0, Int((variation.delay * 1000).rounded()))
+        if delayMs > 0 {
+            try? await Task.sleep(for: .milliseconds(delayMs))
+        }
+        guard Task.isCancelled == false else { return }
+        let duration = Double(variation.durationScale) * 0.48
+        withAnimation(.interactiveSpring(response: duration, dampingFraction: 0.78, blendDuration: 0.02)) {
+            progress = 1
+        }
     }
 }
 
