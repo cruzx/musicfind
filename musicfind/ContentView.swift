@@ -4596,9 +4596,13 @@ private struct PlayerPill: View {
     let onTogglePlayback: () -> Void
     let onPrevious: () -> Void
     let onNext: () -> Void
-    @GestureState private var dragTranslation: CGFloat = 0
+    @State private var dragTranslation: CGFloat = 0
     @State private var committedArtworkOffset: CGFloat = 0
     @State private var isTextVisible = true
+    @State private var isTouchActive = false
+    @State private var touchLocation: CGPoint = CGPoint(x: 120, y: 26)
+    @State private var tapGlowVisible = false
+    @State private var dragHapticStep = 0
 
     private var boundedDragOffset: CGFloat {
         max(-96, min(96, dragTranslation))
@@ -4676,20 +4680,31 @@ private struct PlayerPill: View {
                     )
                 )
         }
+        .overlay {
+            PlayerPillTouchGlow(
+                song: song,
+                location: touchLocation,
+                isActive: isTouchActive,
+                isReleasing: tapGlowVisible
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 27, style: .continuous))
+            .allowsHitTesting(false)
+        }
         .shadow(color: .white.opacity(0.06), radius: 14, y: -5)
         .shadow(color: song.magicColor.opacity(0.12), radius: 18, y: 6)
         .shadow(color: .black.opacity(0.18), radius: 18, y: 9)
         .contentShape(RoundedRectangle(cornerRadius: 27))
-        .onTapGesture(perform: action)
+        .scaleEffect(isTouchActive ? 1.045 : 1)
         .gesture(
-            DragGesture(minimumDistance: 12)
-                .updating($dragTranslation) { value, state, _ in
-                    state = value.translation.width
+            DragGesture(minimumDistance: 0, coordinateSpace: .local)
+                .onChanged { value in
+                    updateTouchInteraction(value)
                 }
                 .onEnded { value in
-                    finishSwipe(value)
+                    finishTouchInteraction(value)
                 }
         )
+        .animation(.bouncy(duration: 0.30, extraBounce: 0.24), value: isTouchActive)
         .liquidGlassSurface(cornerRadius: 27, isInteractive: true)
         .background {
             GeometryReader { proxy in
@@ -4709,6 +4724,48 @@ private struct PlayerPill: View {
             }
         }
         .opacity(isPlayerCardVisible ? 0 : 1)
+    }
+
+    private func updateTouchInteraction(_ value: DragGesture.Value) {
+        touchLocation = value.location
+
+        if isTouchActive == false {
+            isTouchActive = true
+            tapGlowVisible = true
+            dragHapticStep = 0
+            UIImpactFeedbackGenerator(style: .soft).impactOccurred(intensity: 0.26)
+        }
+
+        dragTranslation = value.translation.width
+        let hapticStep = min(5, Int(abs(value.translation.width) / 22))
+        if hapticStep > dragHapticStep {
+            dragHapticStep = hapticStep
+            UIImpactFeedbackGenerator(style: .rigid).impactOccurred(intensity: 0.18 + CGFloat(hapticStep) * 0.035)
+        }
+    }
+
+    private func finishTouchInteraction(_ value: DragGesture.Value) {
+        let isTap = abs(value.translation.width) < 14 && abs(value.translation.height) < 14
+        if isTap {
+            UIImpactFeedbackGenerator(style: .light).impactOccurred(intensity: 0.45)
+            action()
+            releaseTouchGlow()
+            return
+        }
+
+        finishSwipe(value)
+        releaseTouchGlow()
+    }
+
+    private func releaseTouchGlow() {
+        dragTranslation = 0
+        dragHapticStep = 0
+        withAnimation(.smooth(duration: 0.18, extraBounce: 0.0)) {
+            isTouchActive = false
+        }
+        withAnimation(.easeOut(duration: 0.34)) {
+            tapGlowVisible = false
+        }
     }
 
     private func finishSwipe(_ value: DragGesture.Value) {
@@ -4746,6 +4803,47 @@ private struct PlayerPill: View {
                 isTextVisible = true
             }
         }
+    }
+}
+
+private struct PlayerPillTouchGlow: View {
+    let song: DemoSong
+    let location: CGPoint
+    let isActive: Bool
+    let isReleasing: Bool
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .fill(
+                    RadialGradient(
+                        colors: [
+                            .white.opacity(isActive ? 0.54 : 0.34),
+                            song.magicColor.opacity(isActive ? 0.30 : 0.22),
+                            .white.opacity(isActive ? 0.12 : 0.06),
+                            .clear
+                        ],
+                        center: .center,
+                        startRadius: 0,
+                        endRadius: 74
+                    )
+                )
+                .frame(width: isActive ? 146 : 186, height: isActive ? 104 : 136)
+                .blur(radius: isActive ? 3 : 9)
+                .opacity((isActive || isReleasing) ? 1 : 0)
+                .position(location)
+                .blendMode(.screen)
+
+            Circle()
+                .stroke(.white.opacity(isActive ? 0.38 : 0.0), lineWidth: 1.1)
+                .frame(width: isActive ? 54 : 84, height: isActive ? 54 : 84)
+                .blur(radius: 1.2)
+                .position(location)
+                .blendMode(.screen)
+        }
+        .animation(.smooth(duration: 0.18, extraBounce: 0.0), value: location)
+        .animation(.bouncy(duration: 0.26, extraBounce: 0.18), value: isActive)
+        .animation(.easeOut(duration: 0.34), value: isReleasing)
     }
 }
 
