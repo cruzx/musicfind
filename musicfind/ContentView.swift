@@ -60,6 +60,9 @@ struct ContentView: View {
     private var isPlaybackVisuallyActive: Bool {
         musicConnector.isPlaying || musicConnector.isPlaybackTransitioning
     }
+    private var nextPlayablePreviewSong: DemoSong? {
+        adjacentPlayableSong(step: 1, in: songs)
+    }
 
     var body: some View {
         GeometryReader { proxy in
@@ -81,6 +84,7 @@ struct ContentView: View {
                                     backSong: homePendingSongs.indices.contains(slot.id) ? homePendingSongs[slot.id] : visibleHomeSongs[slot.id],
                                     displayedSong: slot.song,
                                     isPlaying: slot.song.id == nowPlaying.id,
+                                    gravity: homeCoverGravity(for: slot, columnCount: homeColumnCount),
                                     progress: homeFlipLocalProgress(for: slot),
                                     variation: homeFlipVariations[slot.id] ?? .zero,
                                     onTap: {
@@ -129,7 +133,7 @@ struct ContentView: View {
                 .zIndex(1)
 
             if isPlaybackVisuallyActive {
-                MusicSparkleField(song: nowPlaying)
+                MusicSparkleField(song: nowPlaying, preference: musicConnector.moodPreference)
                     .frame(width: proxy.size.width, height: min(proxy.size.height * 0.56, 520))
                     .offset(y: 74)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
@@ -145,7 +149,10 @@ struct ContentView: View {
                     if musicConnector.isPlaying {
                         HeaderNowPlayingBadge(song: nowPlaying)
                     } else {
-                        GreetingBadge(mood: currentTimeMood)
+                        VStack(alignment: .leading, spacing: 8) {
+                            GreetingBadge(mood: currentTimeMood)
+                            TimeMoodCapsule(mood: currentTimeMood, preference: musicConnector.moodPreference)
+                        }
                     }
                     Spacer()
                     TopSettingsButton {
@@ -174,6 +181,7 @@ struct ContentView: View {
                     nowPlaying: nowPlaying,
                     isPlaying: musicConnector.isPlaying,
                     isPlaybackLoading: musicConnector.isPlaybackTransitioning,
+                    nextSong: nextPlayablePreviewSong,
                     namespace: playerExpansionNamespace,
                     isPlayerCardVisible: isPlayerCardVisible,
                     isDropTargeted: false,
@@ -185,6 +193,9 @@ struct ContentView: View {
                     },
                     onNext: {
                         playAdjacentSong(step: 1)
+                    },
+                    onMoodSeek: { direction in
+                        playMoodMatchedSong(direction: direction)
                     }
                 )
                 .padding(.horizontal, 8)
@@ -310,6 +321,29 @@ struct ContentView: View {
         musicConnector.queuePlayback(for: song, in: playbackSongs)
     }
 
+    private func playMoodMatchedSong(direction: CGFloat) {
+        let playbackSongs = songs.filter { $0.isPlayable && !$0.isPlaceholder && $0.id != nowPlaying.id }
+        guard playbackSongs.isEmpty == false else { return }
+        let wantsEnergy = direction > 0
+        let mood = currentTimeMood
+        let preference = musicConnector.moodPreference
+        let targetEnergy = wantsEnergy ? min(1.0, 0.70 + preference.energy * 0.22) : max(0.08, 0.26 + preference.energy * 0.16)
+        let chosen = playbackSongs
+            .map { song -> (song: DemoSong, score: Double) in
+                let energyFit = 1.0 - abs(song.rhythmEnergy - targetEnergy)
+                let timeFit = mood.score(song) * 0.22
+                let preferenceFit = preference.score(song) * 0.26
+                return (song, energyFit + timeFit + preferenceFit + Double.random(in: 0...0.18))
+            }
+            .sorted { $0.score > $1.score }
+            .first?.song
+
+        guard let chosen else { return }
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred(intensity: 0.72)
+        nowPlaying = chosen
+        musicConnector.queuePlayback(for: chosen, in: songs)
+    }
+
     private func adjacentPlayableSong(step: Int, in playbackSongs: [DemoSong]) -> DemoSong? {
         guard playbackSongs.isEmpty == false, step != 0 else { return nil }
         let startIndex = playbackSongs.firstIndex(where: { $0.id == nowPlaying.id }) ?? 0
@@ -322,6 +356,41 @@ struct ContentView: View {
             }
         }
         return nil
+    }
+
+    private func homeCoverGravity(for slot: HomeSongSlot, columnCount: Int) -> HomeCoverGravity {
+        guard musicConnector.isPlaying || musicConnector.isPlaybackTransitioning,
+              let playingIndex = visibleHomeSongs.firstIndex(where: { $0.id == nowPlaying.id }) else {
+            return .zero
+        }
+
+        let playingRow = playingIndex / columnCount
+        let playingColumn = playingIndex % columnCount
+        let relation = coverRelationScore(slot.song, to: nowPlaying)
+        let dx = CGFloat(playingColumn - slot.column)
+        let dy = CGFloat(playingRow - slot.row)
+        let length = max(1, sqrt(dx * dx + dy * dy))
+        let polarity: CGFloat = relation > 0.42 ? 1 : -0.58
+        let strength = slot.song.id == nowPlaying.id ? 1 : min(1, max(0.16, relation))
+        let offset = CGSize(
+            width: dx / length * strength * polarity * 7.5,
+            height: dy / length * strength * polarity * 7.5
+        )
+        let scale = slot.song.id == nowPlaying.id ? 1.07 : 1 + max(0, relation - 0.46) * 0.035
+        return HomeCoverGravity(offset: offset, scale: scale, glow: relation)
+    }
+
+    private func coverRelationScore(_ song: DemoSong, to target: DemoSong) -> CGFloat {
+        guard song.id != target.id else { return 1 }
+        var score: CGFloat = 0.18
+        if song.artist == target.artist { score += 0.40 }
+        if song.source == target.source { score += 0.12 }
+        let leftWords = Set("\(song.title) \(song.artist)".lowercased().split(separator: " ").map(String.init))
+        let rightWords = Set("\(target.title) \(target.artist)".lowercased().split(separator: " ").map(String.init))
+        let overlap = leftWords.intersection(rightWords).filter { $0.count > 3 }.count
+        score += CGFloat(min(overlap, 3)) * 0.09
+        score += CGFloat(1 - abs(song.rhythmEnergy - target.rhythmEnergy)) * 0.18
+        return min(1, score)
     }
 
     private func updateTimeMoodIfNeeded() {
@@ -674,6 +743,83 @@ private struct HomeFlipVariation {
     static let zero = HomeFlipVariation(delay: 0, durationScale: 1, tilt: 0, lift: 0)
 }
 
+private struct HomeCoverGravity {
+    let offset: CGSize
+    let scale: CGFloat
+    let glow: CGFloat
+
+    static let zero = HomeCoverGravity(offset: .zero, scale: 1, glow: 0)
+}
+
+private struct MusicMoodPreference: Equatable {
+    var energy: Double
+    var warmth: Double
+
+    static let neutral = MusicMoodPreference(energy: 0, warmth: 0)
+
+    static func load() -> MusicMoodPreference {
+        MusicMoodPreference(
+            energy: UserDefaults.standard.object(forKey: "moodPaletteEnergy") as? Double ?? 0,
+            warmth: UserDefaults.standard.object(forKey: "moodPaletteWarmth") as? Double ?? 0
+        )
+    }
+
+    func save() {
+        UserDefaults.standard.set(energy, forKey: "moodPaletteEnergy")
+        UserDefaults.standard.set(warmth, forKey: "moodPaletteWarmth")
+    }
+
+    var label: String {
+        switch (energy, warmth) {
+        case let (e, w) where e > 0.38 && w > 0.18: return "热烈明亮"
+        case let (e, w) where e > 0.30 && w <= 0.18: return "清醒律动"
+        case let (e, w) where e < -0.30 && w < -0.12: return "冷静深夜"
+        case let (e, w) where e < -0.28 && w >= -0.12: return "柔软慢听"
+        case let (_, w) where w > 0.42: return "暖色流行"
+        case let (_, w) where w < -0.42: return "蓝调氛围"
+        default: return "自然流动"
+        }
+    }
+
+    var tint: Color {
+        let red = min(1, max(0, 0.52 + warmth * 0.28 + max(energy, 0) * 0.16))
+        let green = min(1, max(0, 0.64 + energy * 0.12))
+        let blue = min(1, max(0, 0.82 - warmth * 0.28 - min(energy, 0) * 0.10))
+        return Color(
+            red: red,
+            green: green,
+            blue: blue
+        )
+    }
+
+    var queryHints: [String] {
+        var hints: [String] = []
+        if energy > 0.34 {
+            hints += ["upbeat discoveries", "dance pop energy", "fresh tempo songs"]
+        } else if energy < -0.34 {
+            hints += ["slow listening songs", "soft ambient pop", "quiet night music"]
+        }
+        if warmth > 0.34 {
+            hints += ["warm pop songs", "sunny soul music", "feel good classics"]
+        } else if warmth < -0.34 {
+            hints += ["blue night songs", "dream pop discoveries", "cinematic electronic"]
+        }
+        return hints
+    }
+
+    func score(_ song: DemoSong) -> Double {
+        score(title: song.title, artist: song.artist, rhythmEnergy: song.rhythmEnergy)
+    }
+
+    func score(title: String, artist: String, rhythmEnergy: Double) -> Double {
+        let energyFit = 1 - abs(rhythmEnergy - (0.48 + energy * 0.34))
+        let text = "\(title) \(artist)".lowercased()
+        let warmMatch = ["sun", "gold", "sweet", "hot", "love", "summer"].contains { text.contains($0) } ? 0.22 : 0
+        let coolMatch = ["blue", "night", "moon", "dark", "dream", "ocean"].contains { text.contains($0) } ? 0.22 : 0
+        return energyFit + (warmth >= 0 ? warmMatch : coolMatch)
+    }
+}
+
 private enum HomeTimeMood: Equatable {
     case morning
     case afternoon
@@ -790,6 +936,40 @@ private struct GreetingBadge: View {
     }
 }
 
+private struct TimeMoodCapsule: View {
+    let mood: HomeTimeMood
+    let preference: MusicMoodPreference
+
+    private var timeText: String {
+        let components = Calendar.current.dateComponents([.hour, .minute], from: Date())
+        return String(format: "%02d:%02d", components.hour ?? 0, components.minute ?? 0)
+    }
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Circle()
+                .fill(preference.tint)
+                .frame(width: 7, height: 7)
+                .shadow(color: preference.tint.opacity(0.72), radius: 7)
+
+            Text("\(timeText) · \(mood.recommendationLabel) · \(preference.label)")
+                .font(.system(size: 12, weight: .bold))
+                .foregroundStyle(.white.opacity(0.78))
+                .lineLimit(1)
+                .minimumScaleFactor(0.72)
+        }
+        .padding(.horizontal, 11)
+        .frame(height: 28)
+        .background(.black.opacity(0.26))
+        .clipShape(Capsule())
+        .overlay {
+            Capsule()
+                .stroke(.white.opacity(0.12), lineWidth: 1)
+        }
+        .liquidGlassSurface(cornerRadius: 14, isInteractive: false)
+    }
+}
+
 private struct HeaderNowPlayingBadge: View {
     let song: DemoSong
 
@@ -855,6 +1035,8 @@ private struct ProfilePage: View {
                     }
 
                     SourceSettingsPanel(connector: connector)
+
+                    MoodPalettePanel(connector: connector)
 
                     if let message = connector.message {
                         Text(message)
@@ -933,6 +1115,8 @@ private struct SettingsModalView: View {
                     }
 
                     SourceSettingsPanel(connector: connector)
+
+                    MoodPalettePanel(connector: connector)
 
                     if let message = connector.message {
                         Text(message)
@@ -1158,6 +1342,108 @@ private struct SourceSettingsPanel: View {
     }
 }
 
+private struct MoodPalettePanel: View {
+    @ObservedObject var connector: MusicConnectionManager
+    @State private var dragHapticStep = 0
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Label("心情调色盘", systemImage: "circle.hexagongrid.fill")
+                    .font(.system(size: 14, weight: .black))
+                    .foregroundStyle(.white.opacity(0.88))
+
+                Spacer()
+
+                Text(connector.moodPreference.label)
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(connector.moodPreference.tint.opacity(0.92))
+            }
+
+            GeometryReader { proxy in
+                let size = proxy.size
+                let x = CGFloat((connector.moodPreference.energy + 1) / 2) * size.width
+                let y = CGFloat(1 - (connector.moodPreference.warmth + 1) / 2) * size.height
+
+                ZStack {
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    Color(red: 0.20, green: 0.32, blue: 0.62),
+                                    Color(red: 0.92, green: 0.28, blue: 0.42)
+                                ],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                        .overlay {
+                            LinearGradient(
+                                colors: [.white.opacity(0.28), .clear, .black.opacity(0.36)],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                        }
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                .stroke(.white.opacity(0.12), lineWidth: 1)
+                        }
+
+                    Circle()
+                        .fill(connector.moodPreference.tint)
+                        .frame(width: 27, height: 27)
+                        .overlay {
+                            Circle()
+                                .stroke(.white.opacity(0.86), lineWidth: 2)
+                        }
+                        .shadow(color: connector.moodPreference.tint.opacity(0.70), radius: 14)
+                        .position(x: min(max(x, 14), size.width - 14), y: min(max(y, 14), size.height - 14))
+                }
+                .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .gesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { value in
+                            updatePreference(at: value.location, in: size)
+                        }
+                        .onEnded { _ in
+                            dragHapticStep = 0
+                            UIImpactFeedbackGenerator(style: .medium).impactOccurred(intensity: 0.44)
+                        }
+                )
+            }
+            .frame(height: 86)
+
+            HStack {
+                Text("安静")
+                Spacer()
+                Text("兴奋")
+            }
+            .font(.system(size: 11, weight: .bold))
+            .foregroundStyle(.white.opacity(0.46))
+        }
+        .padding(14)
+        .background(.black.opacity(0.48))
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(.white.opacity(0.10), lineWidth: 1)
+        }
+    }
+
+    private func updatePreference(at location: CGPoint, in size: CGSize) {
+        guard size.width > 1, size.height > 1 else { return }
+        let energy = min(1, max(-1, Double(location.x / size.width) * 2 - 1))
+        let warmth = min(1, max(-1, (1 - Double(location.y / size.height)) * 2 - 1))
+        connector.updateMoodPreference(energy: energy, warmth: warmth)
+
+        let step = Int((abs(energy) + abs(warmth)) * 5)
+        if step != dragHapticStep {
+            dragHapticStep = step
+            UIImpactFeedbackGenerator(style: .soft).impactOccurred(intensity: 0.22 + CGFloat(step) * 0.025)
+        }
+    }
+}
+
 private struct MusicPlaylistOption: Identifiable, Hashable {
     static let allID = "all"
 
@@ -1190,6 +1476,7 @@ private final class MusicConnectionManager: ObservableObject {
     @Published var isPlaying = false
     @Published var isPlaybackTransitioning = false
     @Published var showPlaybackLoadingToast = false
+    @Published var moodPreference = MusicMoodPreference.load()
     @Published private var fetchedLyricsByKey: [String: String] = [:]
     @Published private var loadingLyricKeys: Set<String> = []
 
@@ -1340,6 +1627,17 @@ private final class MusicConnectionManager: ObservableObject {
         guard aiRecommendationsEnabled else { return }
         let mood = HomeTimeMood.current
         guard lastRecommendationMood != mood else { return }
+        refreshRecommendations()
+    }
+
+    func updateMoodPreference(energy: Double, warmth: Double) {
+        let next = MusicMoodPreference(
+            energy: min(1, max(-1, energy)),
+            warmth: min(1, max(-1, warmth))
+        )
+        guard next != moodPreference else { return }
+        moodPreference = next
+        next.save()
         refreshRecommendations()
     }
 
@@ -2108,7 +2406,7 @@ private final class MusicConnectionManager: ObservableObject {
         let artists = topArtists(from: realSongs, limit: 10)
         let titleTokens = weightedTokens(from: realSongs, limit: 12)
         let styleQueries = inferredTasteQueries(from: realSongs, titleTokens: titleTokens)
-        let moodQueries = moodQueries(for: mood)
+        let moodQueries = uniqueQueries(moodQueries(for: mood) + moodPreference.queryHints)
         let moodSignals = recommendationSignals(for: mood)
         let seedRadioQueries = realSongs.prefix(8).map { song in
             "\(song.title) \(song.artist) similar songs"
@@ -2381,6 +2679,7 @@ private final class MusicConnectionManager: ObservableObject {
         for hint in profile.moodGenreHints where genre.contains(hint) {
             score += 2.6
         }
+        score += moodPreference.score(title: track.trackName, artist: track.artistName, rhythmEnergy: 0.50) * 2.1
         for query in profile.styleQueries where searchable.contains(query.components(separatedBy: " ").first ?? query) {
             score += 1.2
         }
@@ -3388,6 +3687,7 @@ private struct BottomNavigationBar: View {
     let nowPlaying: DemoSong
     let isPlaying: Bool
     let isPlaybackLoading: Bool
+    let nextSong: DemoSong?
     let namespace: Namespace.ID
     let isPlayerCardVisible: Bool
     let isDropTargeted: Bool
@@ -3396,6 +3696,7 @@ private struct BottomNavigationBar: View {
     let onTogglePlayback: () -> Void
     let onPrevious: () -> Void
     let onNext: () -> Void
+    let onMoodSeek: (CGFloat) -> Void
 
     private var pillWidth: CGFloat {
         let title = isPlaybackLoading ? "歌曲加载中" : (isPlaying ? nowPlaying.title : "FlipMusic")
@@ -3416,11 +3717,13 @@ private struct BottomNavigationBar: View {
                 isActive: true,
                 namespace: namespace,
                 isPlayerCardVisible: isPlayerCardVisible,
+                nextSong: nextSong,
                 playerPillFrame: $playerPillFrame,
                 action: onPlayerTap,
                 onTogglePlayback: onTogglePlayback,
                 onPrevious: onPrevious,
-                onNext: onNext
+                onNext: onNext,
+                onMoodSeek: onMoodSeek
             )
         }
         .frame(width: pillWidth)
@@ -3438,12 +3741,15 @@ private struct BottomNavigationBar: View {
 
 private struct MusicSparkleField: View {
     let song: DemoSong
+    let preference: MusicMoodPreference
     @State private var particles: [MusicParticleSpec] = []
 
     private enum ParticleMood {
         case sparkle
         case square
         case triangle
+        case mist
+        case neon
     }
 
     private var rhythm: Double {
@@ -3452,10 +3758,14 @@ private struct MusicSparkleField: View {
 
     private var particleMood: ParticleMood {
         switch particleMoodIndex {
-        case 1, 4:
+        case 1:
             return .square
-        case 2, 5:
+        case 2:
             return .triangle
+        case 3:
+            return .mist
+        case 4:
+            return .neon
         default:
             return .sparkle
         }
@@ -3466,7 +3776,7 @@ private struct MusicSparkleField: View {
         let folded = key.unicodeScalars.reduce(abs(song.id)) { partial, scalar in
             (partial &* 31 &+ Int(scalar.value)) & 0x7fffffff
         }
-        return folded % 6
+        return folded % 7
     }
 
     private var moodShapeShare: CGFloat {
@@ -3475,11 +3785,15 @@ private struct MusicSparkleField: View {
             return 0.0
         case .square, .triangle:
             return 0.82
+        case .mist:
+            return 0.18
+        case .neon:
+            return 0.54
         }
     }
 
     private var sparkleCount: Int {
-        Int(90 + rhythm * 70)
+        Int(82 + rhythm * 60 + max(0, preference.energy) * 28 + abs(preference.warmth) * 12)
     }
 
     private var riseDuration: Double {
@@ -3530,6 +3844,9 @@ private struct MusicSparkleField: View {
         .onChange(of: song.id) { _, _ in
             particles = makeParticles()
         }
+        .onChange(of: preference) { _, _ in
+            particles = makeParticles()
+        }
     }
 
     private func drawParticle(
@@ -3574,6 +3891,10 @@ private struct MusicSparkleField: View {
                     style = random(seed, 7.91) > 0.52 ? .diamond : .square
                 case .triangle:
                     style = .triangle
+                case .mist:
+                    style = .circle
+                case .neon:
+                    style = random(seed, 7.91) > 0.45 ? .diamond : .sparkle
                 case .sparkle:
                     style = .sparkle
                 }
@@ -3598,24 +3919,26 @@ private struct MusicSparkleField: View {
                 driftSpeed: 0.08 + Double(random(seed, 6.21)) * 0.18,
                 phase: Double(random(seed, 8.41)) * .pi * 2,
                 radius: CGFloat(0.42 + radiusJitter * radiusScale),
-                opacity: 0.42 + Double(random(seed, 11.19)) * 0.58,
+                opacity: (mood == .mist ? 0.28 : 0.42) + Double(random(seed, 11.19)) * (mood == .mist ? 0.42 : 0.58),
                 tint: tint,
                 coreTint: coreTint,
                 style: style,
-                hasGlow: random(seed, 13.63) > 0.76
+                hasGlow: mood == .neon || random(seed, 13.63) > 0.76
             )
         }
     }
 
     private func particleTint(for seed: Double) -> Color {
         let pick = random(seed, 8.19)
-        if pick < 0.18 {
+        if pick < 0.16 {
+            return preference.tint
+        } else if pick < 0.30 {
             return Color(red: 0.62, green: 0.86, blue: 1.0)
-        } else if pick < 0.34 {
+        } else if pick < 0.44 {
             return Color(red: 1.0, green: 0.82, blue: 0.58)
-        } else if pick < 0.48 {
+        } else if pick < 0.56 {
             return Color(red: 0.82, green: 0.72, blue: 1.0)
-        } else if pick < 0.60 {
+        } else if pick < 0.68 {
             return Color(red: 0.72, green: 1.0, blue: 0.90)
         }
 
@@ -4591,11 +4914,13 @@ private struct PlayerPill: View {
     let isActive: Bool
     let namespace: Namespace.ID
     let isPlayerCardVisible: Bool
+    let nextSong: DemoSong?
     @Binding var playerPillFrame: CGRect
     let action: () -> Void
     let onTogglePlayback: () -> Void
     let onPrevious: () -> Void
     let onNext: () -> Void
+    let onMoodSeek: (CGFloat) -> Void
     @State private var dragTranslation: CGFloat = 0
     @State private var committedArtworkOffset: CGFloat = 0
     @State private var isTextVisible = true
@@ -4603,6 +4928,8 @@ private struct PlayerPill: View {
     @State private var touchLocation: CGPoint = CGPoint(x: 120, y: 26)
     @State private var tapGlowVisible = false
     @State private var dragHapticStep = 0
+    @State private var touchBeganAt: Date?
+    @State private var isMoodSeeking = false
 
     private var boundedDragOffset: CGFloat {
         max(-96, min(96, dragTranslation))
@@ -4615,6 +4942,13 @@ private struct PlayerPill: View {
     var body: some View {
         ZStack {
             PlayerPillGlassBackground(song: song, isActive: isActive)
+
+            if let nextSong {
+                PlayerPillNextPeek(song: nextSong, reveal: min(1, max(0, abs(boundedDragOffset) / 76)))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
+                    .padding(.trailing, 31)
+                    .opacity(isPlaybackLoading ? 0 : 1)
+            }
 
             HStack(spacing: 10) {
                 RotatingAlbumArt(song: song, isSpinning: isPlaying)
@@ -4690,6 +5024,19 @@ private struct PlayerPill: View {
             .clipShape(RoundedRectangle(cornerRadius: 27, style: .continuous))
             .allowsHitTesting(false)
         }
+        .overlay(alignment: .top) {
+            if isMoodSeeking {
+                Text(boundedDragOffset >= 0 ? "更兴奋" : "更安静")
+                    .font(.system(size: 11, weight: .black))
+                    .foregroundStyle(.white.opacity(0.88))
+                    .padding(.horizontal, 10)
+                    .frame(height: 23)
+                    .background(song.magicColor.opacity(0.34))
+                    .clipShape(Capsule())
+                    .offset(y: -28)
+                    .transition(.scale(scale: 0.86).combined(with: .opacity))
+            }
+        }
         .shadow(color: .white.opacity(0.06), radius: 14, y: -5)
         .shadow(color: song.magicColor.opacity(0.12), radius: 18, y: 6)
         .shadow(color: .black.opacity(0.18), radius: 18, y: 9)
@@ -4733,10 +5080,19 @@ private struct PlayerPill: View {
             isTouchActive = true
             tapGlowVisible = true
             dragHapticStep = 0
+            touchBeganAt = Date()
+            isMoodSeeking = false
             UIImpactFeedbackGenerator(style: .soft).impactOccurred(intensity: 0.26)
         }
 
         dragTranslation = value.translation.width
+        if let touchBeganAt,
+           Date().timeIntervalSince(touchBeganAt) > 0.34,
+           abs(value.translation.width) > 28,
+           isMoodSeeking == false {
+            isMoodSeeking = true
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred(intensity: 0.46)
+        }
         let hapticStep = min(5, Int(abs(value.translation.width) / 22))
         if hapticStep > dragHapticStep {
             dragHapticStep = hapticStep
@@ -4753,6 +5109,12 @@ private struct PlayerPill: View {
             return
         }
 
+        if isMoodSeeking, abs(value.translation.width) > 42 {
+            onMoodSeek(value.translation.width)
+            releaseTouchGlow()
+            return
+        }
+
         finishSwipe(value)
         releaseTouchGlow()
     }
@@ -4760,6 +5122,8 @@ private struct PlayerPill: View {
     private func releaseTouchGlow() {
         dragTranslation = 0
         dragHapticStep = 0
+        touchBeganAt = nil
+        isMoodSeeking = false
         withAnimation(.smooth(duration: 0.18, extraBounce: 0.0)) {
             isTouchActive = false
         }
@@ -4844,6 +5208,36 @@ private struct PlayerPillTouchGlow: View {
         .animation(.smooth(duration: 0.18, extraBounce: 0.0), value: location)
         .animation(.bouncy(duration: 0.26, extraBounce: 0.18), value: isActive)
         .animation(.easeOut(duration: 0.34), value: isReleasing)
+    }
+}
+
+private struct PlayerPillNextPeek: View {
+    let song: DemoSong
+    let reveal: CGFloat
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .fill(LinearGradient(colors: song.colors, startPoint: .topLeading, endPoint: .bottomTrailing))
+
+            if let artworkImage = PlayerArtworkWarmupCache.shared.artwork(for: song) ?? song.artworkImage {
+                Image(uiImage: artworkImage)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+            }
+        }
+        .frame(width: 30, height: 30)
+        .clipShape(Circle())
+        .overlay {
+            Circle()
+                .stroke(.white.opacity(0.22), lineWidth: 1)
+        }
+        .shadow(color: song.magicColor.opacity(0.24), radius: 9)
+        .offset(x: 19 - reveal * 10)
+        .opacity(0.34 + reveal * 0.46)
+        .scaleEffect(0.86 + reveal * 0.14)
+        .allowsHitTesting(false)
+        .animation(.smooth(duration: 0.16, extraBounce: 0.0), value: reveal)
     }
 }
 
@@ -5670,6 +6064,7 @@ private struct HomeInteractiveSongSquare: View {
     let backSong: DemoSong
     let displayedSong: DemoSong
     let isPlaying: Bool
+    let gravity: HomeCoverGravity
     let progress: CGFloat
     let variation: HomeFlipVariation
     let onTap: () -> Void
@@ -5685,6 +6080,15 @@ private struct HomeInteractiveSongSquare: View {
             )
             .contentShape(RoundedRectangle(cornerRadius: 8))
             .onTapGesture(perform: onTap)
+            .scaleEffect(gravity.scale)
+            .offset(gravity.offset)
+            .shadow(
+                color: displayedSong.magicColor.opacity(isPlaying ? 0.36 : Double(max(0, gravity.glow - 0.55)) * 0.20),
+                radius: isPlaying ? 18 : 8,
+                y: isPlaying ? 8 : 3
+            )
+            .animation(.smooth(duration: 0.34, extraBounce: 0.0), value: isPlaying)
+            .animation(.smooth(duration: 0.42, extraBounce: 0.0), value: gravity.glow)
         }
         .frame(maxWidth: .infinity)
         .aspectRatio(1, contentMode: .fit)
