@@ -10,6 +10,7 @@ import UIKit
 import CoreMotion
 import Combine
 import MediaPlayer
+import AVFoundation
 import AuthenticationServices
 import CryptoKit
 import Network
@@ -585,6 +586,7 @@ struct ContentView: View {
             colors: latest.artworkImage == nil ? current.colors : latest.colors,
             mediaItem: latest.mediaItem ?? current.mediaItem,
             storeID: latest.storeID ?? current.storeID,
+            previewURL: latest.previewURL ?? current.previewURL,
             artworkImage: artworkImage,
             backdropImage: backdropImage,
             lyricsText: latest.lyricsText ?? current.lyricsText,
@@ -2021,6 +2023,10 @@ private final class MusicConnectionManager: ObservableObject {
     private var homeFeedRequestID = 0
     private var recommendationTask: Task<Void, Never>?
     private var playbackObservers: [NSObjectProtocol] = []
+    private var previewAudioPlayer: AVPlayer?
+    private var previewEndObserver: NSObjectProtocol?
+    private var previewPlaybackTask: Task<Void, Never>?
+    private var previewSongID: Int?
     private var playbackRequestID = 0
     @Published private(set) var activePlaybackQueue: [DemoSong] = []
     private var autoAdvanceTask: Task<Void, Never>?
@@ -2284,8 +2290,9 @@ private final class MusicConnectionManager: ObservableObject {
                 maxCount: 220,
                 playlistID: selectedSpotifyPlaylistID
             )
-            spotifySongs = spotifySongs(from: drafts, artworkByID: [:], appleTrackByID: [:])
-            hydrateSpotifyMetadata(for: drafts)
+            let initialAppleMatches = await appleCatalogMatches(for: Array(drafts.prefix(48)))
+            spotifySongs = spotifySongs(from: drafts, artworkByID: [:], appleTrackByID: initialAppleMatches)
+            hydrateSpotifyMetadata(for: drafts, initialAppleTrackByID: initialAppleMatches)
             refreshHomeFeed()
             if aiRecommendationsEnabled {
                 refreshRecommendations()
@@ -2322,6 +2329,7 @@ private final class MusicConnectionManager: ObservableObject {
                 artist: draft.artist,
                 colors: palette,
                 storeID: matchedTrack?.trackID,
+                previewURL: draft.previewURL ?? matchedTrack?.previewURL,
                 artworkImage: artworkImage,
                 backdropImage: artworkImage?.playerBackdropImage,
                 magicColor: Color(uiColor: magicColor),
@@ -2330,17 +2338,22 @@ private final class MusicConnectionManager: ObservableObject {
         }
     }
 
-    private func hydrateSpotifyMetadata(for drafts: [SpotifySongDraft]) {
+    private func hydrateSpotifyMetadata(for drafts: [SpotifySongDraft], initialAppleTrackByID: [String: ITunesTrack] = [:]) {
         Task { @MainActor in
             guard spotifyAccessToken.isEmpty == false else { return }
             let imageDrafts = Array(drafts.prefix(24))
             var artworkByID: [String: UIImage] = [:]
-            var appleTrackByID: [String: ITunesTrack] = [:]
+            var appleTrackByID = initialAppleTrackByID
             for draft in imageDrafts {
                 guard spotifyAccessToken.isEmpty == false else { return }
                 async let spotifyArtwork = ITunesSearchClient.artworkImage(from: draft.artworkURL)
-                async let appleMatch = bestAppleCatalogMatch(for: draft)
-                if let track = await appleMatch {
+                let appleMatch: ITunesTrack?
+                if let existingMatch = appleTrackByID[draft.id] {
+                    appleMatch = existingMatch
+                } else {
+                    appleMatch = await bestAppleCatalogMatch(for: draft)
+                }
+                if let track = appleMatch {
                     appleTrackByID[draft.id] = track
                 }
                 var resolvedArtwork = await spotifyArtwork
@@ -2357,6 +2370,15 @@ private final class MusicConnectionManager: ObservableObject {
                 }
             }
         }
+    }
+
+    private func appleCatalogMatches(for drafts: [SpotifySongDraft]) async -> [String: ITunesTrack] {
+        var matches: [String: ITunesTrack] = [:]
+        for draft in drafts {
+            guard let match = await bestAppleCatalogMatch(for: draft) else { continue }
+            matches[draft.id] = match
+        }
+        return matches
     }
 
     private func bestAppleCatalogMatch(for draft: SpotifySongDraft) async -> ITunesTrack? {
@@ -2587,6 +2609,30 @@ private final class MusicConnectionManager: ObservableObject {
             message = "这首是 AI 推荐，暂时没有可播放资源。"
             return
         }
+        if previewSongID == song.id, let previewAudioPlayer {
+            if previewAudioPlayer.timeControlStatus == .playing {
+                previewAudioPlayer.pause()
+                autoAdvanceTask?.cancel()
+                autoAdvanceTask = nil
+                shouldAutoAdvancePlayback = false
+                playingSongID = song.id
+                currentSong = song
+                isPlaying = false
+                endPlaybackLoading()
+                message = "已暂停：\(song.title)"
+            } else {
+                try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [])
+                try? AVAudioSession.sharedInstance().setActive(true)
+                previewAudioPlayer.play()
+                shouldAutoAdvancePlayback = true
+                playingSongID = song.id
+                currentSong = song
+                isPlaying = true
+                endPlaybackLoading()
+                message = "正在播放预览：\(song.title)"
+            }
+            return
+        }
         let player = MPMusicPlayerController.applicationMusicPlayer
         if player.playbackState == .playing, isPlayerCurrentlyOn(song, player: player) {
             player.pause()
@@ -2690,6 +2736,11 @@ private final class MusicConnectionManager: ObservableObject {
     }
 
     private func syncPlaybackState() {
+        if let previewAudioPlayer {
+            isPlaying = isPlaybackTransitioning ? true : previewAudioPlayer.timeControlStatus == .playing
+            return
+        }
+
         let player = MPMusicPlayerController.applicationMusicPlayer
         let playbackState = player.playbackState
         isPlaying = isPlaybackTransitioning ? true : playbackState == .playing
@@ -2796,6 +2847,7 @@ private final class MusicConnectionManager: ObservableObject {
             colors: song.colors,
             mediaItem: song.mediaItem ?? item,
             storeID: song.storeID ?? item.safePlaybackStoreID,
+            previewURL: song.previewURL,
             artworkImage: artworkImage,
             backdropImage: artworkImage?.playerBackdropImage ?? song.backdropImage,
             lyricsText: Self.extractLyrics(from: item) ?? song.lyricsText,
@@ -2805,6 +2857,7 @@ private final class MusicConnectionManager: ObservableObject {
     }
 
     private func setPlaybackQueue(on player: MPMusicPlayerController, startingWith song: DemoSong, in queueSongs: [DemoSong]?) {
+        stopPreviewPlayback(clearPlaybackState: false)
         if player.playbackState == .playing {
             player.pause()
         }
@@ -2817,10 +2870,18 @@ private final class MusicConnectionManager: ObservableObject {
         queueSongs: [DemoSong]?,
         requestID: Int
     ) {
+        guard song.hasApplePlaybackSource else {
+            startPreviewPlayback(for: song, in: queueSongs, requestID: requestID)
+            return
+        }
+
         player.prepareToPlay { [weak self] error in
             Task { @MainActor in
                 guard let self, self.playingSongID == song.id, self.playbackRequestID == requestID else { return }
                 if let error {
+                    if self.startPreviewPlayback(for: song, in: queueSongs, requestID: requestID) {
+                        return
+                    }
                     self.endPlaybackLoading(requestID: requestID)
                     self.message = "加载这首歌有点慢：\(error.localizedDescription)"
                     return
@@ -2829,8 +2890,92 @@ private final class MusicConnectionManager: ObservableObject {
                 self.schedulePlaybackPrefetch(startingWith: song, in: queueSongs, requestID: requestID)
                 self.endPlaybackLoading(requestID: requestID)
                 self.message = "正在播放：\(song.title)"
+                self.previewPlaybackTask?.cancel()
+                self.previewPlaybackTask = Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(1_500))
+                    guard !Task.isCancelled,
+                          self.playbackRequestID == requestID,
+                          self.playingSongID == song.id,
+                          self.previewSongID == nil,
+                          player.playbackState != .playing else { return }
+                    _ = self.startPreviewPlayback(for: song, in: queueSongs, requestID: requestID)
+                }
             }
         }
+    }
+
+    @discardableResult
+    private func startPreviewPlayback(for song: DemoSong, in queueSongs: [DemoSong]?, requestID: Int? = nil) -> Bool {
+        guard let previewURL = song.previewURL,
+              let url = URL(string: previewURL) else {
+            return false
+        }
+        if let requestID, requestID != playbackRequestID {
+            return false
+        }
+
+        previewPlaybackTask?.cancel()
+        let musicPlayer = MPMusicPlayerController.applicationMusicPlayer
+        if musicPlayer.playbackState == .playing || musicPlayer.playbackState == .paused {
+            musicPlayer.stop()
+        }
+        stopPreviewPlayback(clearPlaybackState: false)
+        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [])
+        try? AVAudioSession.sharedInstance().setActive(true)
+
+        let playerItem = AVPlayerItem(url: url)
+        let player = AVPlayer(playerItem: playerItem)
+        previewAudioPlayer = player
+        previewSongID = song.id
+        currentSong = song
+        playingSongID = song.id
+        isPlaying = true
+        shouldAutoAdvancePlayback = true
+        activePlaybackQueue = compactPlaybackQueueSnapshot(startingWith: song, in: queueSongs, randomizeTail: false)
+        endPlaybackLoading(requestID: requestID)
+        message = "正在播放预览：\(song.title)"
+
+        previewEndObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime,
+            object: playerItem,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.handlePreviewPlaybackEnded(songID: song.id)
+            }
+        }
+        player.play()
+        return true
+    }
+
+    private func stopPreviewPlayback(clearPlaybackState: Bool) {
+        previewPlaybackTask?.cancel()
+        previewPlaybackTask = nil
+        previewAudioPlayer?.pause()
+        previewAudioPlayer = nil
+        previewSongID = nil
+        if let previewEndObserver {
+            NotificationCenter.default.removeObserver(previewEndObserver)
+            self.previewEndObserver = nil
+        }
+        if clearPlaybackState {
+            playingSongID = nil
+            isPlaying = false
+            shouldAutoAdvancePlayback = false
+        }
+    }
+
+    private func handlePreviewPlaybackEnded(songID: Int) {
+        guard previewSongID == songID else { return }
+        stopPreviewPlayback(clearPlaybackState: false)
+        guard shouldAutoAdvancePlayback,
+              let currentSong,
+              let nextSong = nextSongAfterPlaybackStop(currentSong) else {
+            shouldAutoAdvancePlayback = false
+            isPlaying = false
+            return
+        }
+        queuePlayback(for: nextSong, in: activePlaybackQueue, randomizeQueue: false)
     }
 
     private func schedulePlaybackPrefetch(startingWith song: DemoSong, in queueSongs: [DemoSong]?, requestID: Int) {
@@ -3610,6 +3755,7 @@ private final class MusicConnectionManager: ObservableObject {
                     artist: track.artistName,
                     colors: palette,
                     storeID: track.trackID,
+                    previewURL: track.previewURL,
                     artworkImage: artworkImage,
                     backdropImage: artworkImage?.playerBackdropImage,
                     magicColor: Color(uiColor: magicColor),
@@ -4004,6 +4150,7 @@ private final class MusicConnectionManager: ObservableObject {
         guard let currentSong, disconnectedSources.contains(currentSong.source) else { return }
         let player = MPMusicPlayerController.applicationMusicPlayer
         player.stop()
+        stopPreviewPlayback(clearPlaybackState: true)
         self.currentSong = nil
         playingSongID = nil
         isPlaying = false
@@ -4216,7 +4363,8 @@ private enum SpotifyWebAPIClient {
                     id: track.id,
                     title: track.name,
                     artist: artist.isEmpty ? "Spotify" : artist,
-                    artworkURL: track.album?.images.first?.url
+                    artworkURL: track.album?.images.first?.url,
+                    previewURL: track.previewURL
                 )
             )
         }
@@ -4230,6 +4378,7 @@ private struct SpotifySongDraft: Identifiable {
     let title: String
     let artist: String
     let artworkURL: String?
+    let previewURL: String?
 }
 
 private struct SpotifySavedTracksResponse: Decodable {
@@ -4287,6 +4436,15 @@ private struct SpotifyTrack: Decodable {
     let name: String
     let artists: [SpotifyArtist]
     let album: SpotifyAlbum?
+    let previewURL: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case artists
+        case album
+        case previewURL = "preview_url"
+    }
 }
 
 private struct SpotifyArtist: Decodable {
@@ -7896,6 +8054,7 @@ private struct ITunesTrack: Decodable {
     let trackName: String
     let artistName: String
     let artworkURL100: String?
+    let previewURL: String?
     let releaseDate: Date?
     let primaryGenreName: String?
 
@@ -7906,6 +8065,7 @@ private struct ITunesTrack: Decodable {
         case name
         case artistName
         case artworkURL100 = "artworkUrl100"
+        case previewURL = "previewUrl"
         case releaseDate
         case primaryGenreName
     }
@@ -7926,6 +8086,7 @@ private struct ITunesTrack: Decodable {
         }
         artistName = try container.decode(String.self, forKey: .artistName)
         artworkURL100 = try container.decodeIfPresent(String.self, forKey: .artworkURL100)
+        previewURL = try container.decodeIfPresent(String.self, forKey: .previewURL)
         primaryGenreName = try container.decodeIfPresent(String.self, forKey: .primaryGenreName)
         if let releaseDateString = try container.decodeIfPresent(String.self, forKey: .releaseDate) {
             releaseDate = ISO8601DateFormatter().date(from: releaseDateString)
@@ -7967,6 +8128,7 @@ private struct DemoSong: Identifiable {
     let colors: [Color]
     let mediaItem: MPMediaItem?
     let storeID: String?
+    let previewURL: String?
     let artworkImage: UIImage?
     let backdropImage: UIImage?
     let lyricsText: String?
@@ -7980,6 +8142,7 @@ private struct DemoSong: Identifiable {
         colors: [Color],
         mediaItem: MPMediaItem? = nil,
         storeID: String? = nil,
+        previewURL: String? = nil,
         artworkImage: UIImage? = nil,
         backdropImage: UIImage? = nil,
         lyricsText: String? = nil,
@@ -7992,6 +8155,7 @@ private struct DemoSong: Identifiable {
         self.colors = colors
         self.mediaItem = mediaItem
         self.storeID = storeID
+        self.previewURL = previewURL
         self.artworkImage = artworkImage
         self.backdropImage = backdropImage
         self.lyricsText = lyricsText
@@ -8000,6 +8164,10 @@ private struct DemoSong: Identifiable {
     }
 
     var isPlayable: Bool {
+        hasApplePlaybackSource || previewURL != nil
+    }
+
+    var hasApplePlaybackSource: Bool {
         mediaItem != nil || storeID != nil
     }
 
