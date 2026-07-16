@@ -98,8 +98,11 @@ struct ContentView: View {
     private var isPlaybackVisuallyActive: Bool {
         musicConnector.isPlaying || musicConnector.isPlaybackTransitioning
     }
+    private var playerDisplaySong: DemoSong {
+        musicConnector.currentSong ?? nowPlaying
+    }
     private var nextPlayablePreviewSong: DemoSong? {
-        musicConnector.queuedNeighbor(for: nowPlaying, step: 1, fallbackSongs: songs)
+        musicConnector.queuedNeighbor(for: playerDisplaySong, step: 1, fallbackSongs: songs)
     }
 
     var body: some View {
@@ -175,7 +178,7 @@ struct ContentView: View {
                 .zIndex(1)
 
             if isPlaybackVisuallyActive {
-                MusicSparkleField(song: nowPlaying, preference: musicConnector.moodPreference)
+                MusicSparkleField(song: playerDisplaySong, preference: musicConnector.moodPreference)
                     .frame(width: proxy.size.width, height: min(proxy.size.height * 0.56, 520))
                     .offset(y: 74)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
@@ -190,7 +193,7 @@ struct ContentView: View {
                 HStack(alignment: .top) {
                     VStack(alignment: .leading, spacing: 8) {
                         if musicConnector.isPlaying {
-                            HeaderNowPlayingBadge(song: nowPlaying)
+                            HeaderNowPlayingBadge(song: playerDisplaySong)
                         } else {
                             GreetingBadge(mood: currentTimeMood)
                         }
@@ -223,7 +226,7 @@ struct ContentView: View {
             VStack {
                 Spacer()
                 BottomNavigationBar(
-                    nowPlaying: nowPlaying,
+                    nowPlaying: playerDisplaySong,
                     isPlaying: musicConnector.isPlaying,
                     isPlaybackLoading: musicConnector.isPlaybackTransitioning,
                     nextSong: nextPlayablePreviewSong,
@@ -365,17 +368,18 @@ struct ContentView: View {
     private func toggleCurrentPlayback() {
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
         let playbackSongs = songs
-        Task { await musicConnector.togglePlayback(for: nowPlaying, in: playbackSongs) }
+        Task { await musicConnector.togglePlayback(for: playerDisplaySong, in: playbackSongs) }
     }
 
     private func playAdjacentSong(step: Int) {
-        guard let song = musicConnector.playQueuedNeighbor(from: nowPlaying, step: step, fallbackSongs: songs) else { return }
+        guard let song = musicConnector.playQueuedNeighbor(from: playerDisplaySong, step: step, fallbackSongs: songs) else { return }
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
         nowPlaying = song
     }
 
     private func playMoodMatchedSong(direction: CGFloat) {
-        let playbackSongs = songs.filter { $0.isPlayable && !$0.isPlaceholder && $0.id != nowPlaying.id }
+        let currentSong = playerDisplaySong
+        let playbackSongs = songs.filter { $0.isPlayable && !$0.isPlaceholder && $0.id != currentSong.id }
         guard playbackSongs.isEmpty == false else { return }
         let wantsEnergy = direction > 0
         let mood = currentTimeMood
@@ -449,7 +453,7 @@ struct ContentView: View {
         isPlayerCardContentVisible = false
         isPlayerCardDismissing = false
         isPlayerCardVisible = true
-        musicConnector.loadLyricsIfNeeded(for: nowPlaying)
+        musicConnector.loadLyricsIfNeeded(for: playerDisplaySong)
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) {
             guard isPlayerCardVisible else { return }
@@ -4524,7 +4528,9 @@ private struct BadgePhysicsPanel: View {
     @State private var lastSongIDs: [Int] = []
     @State private var lastCollisionHapticAt: Date = .distantPast
 
-    private let frameRate = Timer.publish(every: 1.0 / 60.0, on: .main, in: .common).autoconnect()
+    private let frameRate = Timer.publish(every: 1.0 / 20.0, on: .main, in: .common).autoconnect()
+    private let minimumVisualMovement: CGFloat = 1.8
+    private let sleepVelocity: CGFloat = 14
 
     var body: some View {
         GeometryReader { proxy in
@@ -4561,7 +4567,8 @@ private struct BadgePhysicsPanel: View {
 
     private func resetBadges(in size: CGSize, force: Bool = false) {
         let ids = panelSongs.map(\.id)
-        guard size.width > 10, size.height > 10, force || size != lastSize || ids != lastSongIDs else { return }
+        let sizeChanged = abs(size.width - lastSize.width) > 4 || abs(size.height - lastSize.height) > 4
+        guard size.width > 10, size.height > 10, force || sizeChanged || ids != lastSongIDs else { return }
         lastSize = size
         lastSongIDs = ids
         let columns: [CGFloat] = [0.13, 0.31, 0.49, 0.67, 0.85]
@@ -4580,20 +4587,33 @@ private struct BadgePhysicsPanel: View {
     }
 
     private func stepBadges(in size: CGSize) {
-        guard size.width > 10, size.height > 10 else { return }
+        guard size.width > 10, size.height > 10, badges.isEmpty == false else { return }
 
         var next = badges
         var strongestImpact: CGFloat = 0
+        var largestMovement: CGFloat = 0
         let gravity = motion.gravity
-        let acceleration = CGPoint(x: CGFloat(gravity.x) * 1_020, y: CGFloat(-gravity.y) * 1_020)
-        let dt: CGFloat = 1.0 / 60.0
-        let damping: CGFloat = 0.992
+        let acceleration = CGPoint(x: CGFloat(gravity.x) * 420, y: CGFloat(-gravity.y) * 420)
+        let dt: CGFloat = 1.0 / 20.0
+        let damping: CGFloat = 0.94
 
         for index in next.indices {
             next[index].velocity.x = (next[index].velocity.x + acceleration.x * dt) * damping
             next[index].velocity.y = (next[index].velocity.y + acceleration.y * dt) * damping
+            if abs(next[index].velocity.x) < sleepVelocity {
+                next[index].velocity.x = 0
+            }
+            if abs(next[index].velocity.y) < sleepVelocity {
+                next[index].velocity.y = 0
+            }
+            let previousPosition = next[index].position
             next[index].position.x += next[index].velocity.x * dt
             next[index].position.y += next[index].velocity.y * dt
+            largestMovement = max(
+                largestMovement,
+                abs(next[index].position.x - previousPosition.x),
+                abs(next[index].position.y - previousPosition.y)
+            )
 
             let radius = next[index].radius
             if next[index].position.x < radius {
@@ -4623,6 +4643,7 @@ private struct BadgePhysicsPanel: View {
             }
         }
 
+        guard largestMovement >= minimumVisualMovement || strongestImpact > 0 else { return }
         badges = next
         triggerCollisionHapticIfNeeded(strength: strongestImpact)
     }
@@ -4659,9 +4680,9 @@ private struct BadgePhysicsPanel: View {
     }
 
     private func triggerCollisionHapticIfNeeded(strength: CGFloat) {
-        guard strength > 38 else { return }
+        guard strength > 110 else { return }
         let now = Date()
-        guard now.timeIntervalSince(lastCollisionHapticAt) > 0.07 else { return }
+        guard now.timeIntervalSince(lastCollisionHapticAt) > 0.35 else { return }
         lastCollisionHapticAt = now
         let intensity = min(0.95, max(0.40, strength / 420))
         UIImpactFeedbackGenerator(style: .rigid).impactOccurred(intensity: intensity)
@@ -4710,13 +4731,28 @@ private final class MotionGravityObserver: ObservableObject {
     @Published var gravity = CMAcceleration(x: 0, y: -0.75, z: 0)
 
     private let manager = CMMotionManager()
+    private var lastPublishedGravity = CMAcceleration(x: 0, y: -0.75, z: 0)
+    private var lastPublishTime = Date.distantPast
+    private let gravityDeadband = 0.16
+    private let minimumPublishInterval: TimeInterval = 1.0 / 8.0
 
     func start() {
         guard manager.isDeviceMotionAvailable else { return }
-        manager.deviceMotionUpdateInterval = 1.0 / 60.0
+        manager.deviceMotionUpdateInterval = 1.0 / 20.0
         manager.startDeviceMotionUpdates(to: .main) { [weak self] motion, _ in
-            guard let motion else { return }
-            self?.gravity = motion.gravity
+            guard let self, let motion else { return }
+            let nextGravity = motion.gravity
+            let delta = max(
+                abs(nextGravity.x - lastPublishedGravity.x),
+                abs(nextGravity.y - lastPublishedGravity.y),
+                abs(nextGravity.z - lastPublishedGravity.z)
+            )
+            let now = Date()
+            guard delta >= gravityDeadband,
+                  now.timeIntervalSince(lastPublishTime) >= minimumPublishInterval else { return }
+            lastPublishedGravity = nextGravity
+            lastPublishTime = now
+            gravity = nextGravity
         }
     }
 
@@ -5025,6 +5061,7 @@ private struct BottomNavigationBar: View {
                 onNext: onNext,
                 onMoodSeek: onMoodSeek
             )
+            .id(nowPlaying.id)
         }
         .frame(width: pillWidth)
         .scaleEffect(isDropTargeted ? 1.10 : 1)
