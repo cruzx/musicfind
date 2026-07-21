@@ -33,6 +33,10 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>spotify</string>
+	</array>
 	<key>NSAppleMusicUsageDescription</key>
 	<string>用于连接 Apple Music 并读取你的音乐授权状态。</string>
 	<key>UIApplicationSceneManifest</key>

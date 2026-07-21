@@ -30,11 +30,14 @@ struct ContentView: View {
     @State private var homeSongs: [DemoSong] = []
     @State private var homePendingSongs: [DemoSong] = []
     @State private var homeFlipVariations: [Int: HomeFlipVariation] = [:]
+    @State private var homeFlippingIndices: Set<Int> = []
+    @State private var homeAppearingFlipIndices: Set<Int> = []
     @State private var isHomeFlipping = false
     @State private var homeFlipGeneration = UUID()
     @State private var isHomeLoadingMore = false
     @State private var isHomeAppendingMore = false
     @State private var homeLoadMorePage = 0
+    @State private var homeAutoFillTask: Task<Void, Never>?
     @State private var temporarilySkippedHomeSongIDs: [Int] = []
     @State private var recentlyShownHomeSongIDs: [Int] = []
     @State private var homeSessionSalt = Double.random(in: 0..<10_000)
@@ -51,34 +54,14 @@ struct ContentView: View {
 
     private let spacing: CGFloat = 8
     private var songs: [DemoSong] {
-        let visibleSongs = musicConnector.homeSurfaceSongs.filter { isHomeSongDisliked($0) == false }
-        if musicConnector.isConnectedToAnyMusicService == false {
-            let localFallbackSongs = loginBackgroundFallbackSongs.filter { isHomeSongDisliked($0) == false }
-            if visibleSongs.isEmpty == false {
-                return visibleSongs + localFallbackSongs
-            }
-            return localFallbackSongs
+        let visibleSongs = musicConnector.homeSurfaceSongs.filter {
+            $0.isHomeSurfacePlayable && isHomeSongDisliked($0) == false
         }
-
         if visibleSongs.isEmpty == false {
             return visibleSongs
         }
 
         return homeLoadingPlaceholders
-    }
-
-    private var loginBackgroundFallbackSongs: [DemoSong] {
-        (0..<96).map { index in
-            let baseSong = DemoSong.library[index % DemoSong.library.count]
-            return DemoSong(
-                id: -30_000 - index,
-                title: baseSong.title,
-                artist: baseSong.artist,
-                colors: baseSong.colors,
-                magicColor: baseSong.magicColor,
-                source: .demo
-            )
-        }
     }
 
     private var homeLoadingPlaceholders: [DemoSong] {
@@ -90,11 +73,24 @@ struct ContentView: View {
     private var visibleHomeSongs: [DemoSong] {
         homeSongs.isEmpty ? songs : homeSongs
     }
+    private var isInitialLibraryLoadingVisible: Bool {
+        if musicConnector.isInitialLibraryLoading {
+            return true
+        }
+        return musicConnector.isConnectingAppleMusic ||
+            musicConnector.isConnectingSpotify
+    }
     private var settingsBackdropBlur: CGFloat {
         activeTab == .settings ? 16 : 0
     }
     private var playerBackdropBlur: CGFloat {
         isPlayerCardVisible ? 18 : 0
+    }
+    private var loadingBackdropBlur: CGFloat {
+        isInitialLibraryLoadingVisible ? 24 : 0
+    }
+    private var sceneBackdropBlur: CGFloat {
+        settingsBackdropBlur + playerBackdropBlur + loadingBackdropBlur
     }
     private var isPlaybackVisuallyActive: Bool {
         musicConnector.isPlaying || musicConnector.isPlaybackTransitioning
@@ -127,7 +123,8 @@ struct ContentView: View {
                                     displayedSong: slot.song,
                                     isPlaying: slot.song.id == nowPlaying.id,
                                     gravity: homeCoverGravity(for: slot, columnCount: homeColumnCount),
-                                    isFlipping: isHomeFlipping,
+                                    isFlipping: isHomeFlipping && homeFlippingIndices.contains(slot.id),
+                                    isAppearing: homeAppearingFlipIndices.contains(slot.id),
                                     flipGeneration: homeFlipGeneration,
                                     variation: homeFlipVariations[slot.id] ?? .zero,
                                     onTap: {
@@ -158,7 +155,7 @@ struct ContentView: View {
                         registerHomeInteraction()
                     }
             )
-            .blur(radius: settingsBackdropBlur + playerBackdropBlur, opaque: false)
+            .blur(radius: sceneBackdropBlur, opaque: false)
             .scaleEffect(activeTab == .settings ? 0.985 : (isPlayerCardVisible ? 0.985 : 1))
             .animation(.smooth(duration: 0.24, extraBounce: 0.0), value: activeTab)
             .animation(.smooth(duration: 0.24, extraBounce: 0.0), value: isPlayerCardVisible)
@@ -167,14 +164,14 @@ struct ContentView: View {
             TopGlassFade()
                 .ignoresSafeArea(edges: .top)
                 .allowsHitTesting(false)
-                .blur(radius: settingsBackdropBlur + playerBackdropBlur, opaque: false)
+                .blur(radius: sceneBackdropBlur, opaque: false)
                 .opacity(chromeOpacity)
                 .zIndex(1)
 
             BottomGlassFade()
                 .ignoresSafeArea(edges: .bottom)
                 .allowsHitTesting(false)
-                .blur(radius: settingsBackdropBlur + playerBackdropBlur, opaque: false)
+                .blur(radius: sceneBackdropBlur, opaque: false)
                 .opacity(chromeOpacity)
                 .zIndex(1)
 
@@ -185,7 +182,7 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                 .ignoresSafeArea(edges: .bottom)
                 .allowsHitTesting(false)
-                .blur(radius: settingsBackdropBlur + playerBackdropBlur, opaque: false)
+                .blur(radius: sceneBackdropBlur, opaque: false)
                 .transition(.opacity.animation(.easeOut(duration: 0.22)))
                 .zIndex(4)
             }
@@ -199,8 +196,8 @@ struct ContentView: View {
                             GreetingBadge(mood: currentTimeMood)
                         }
 
-                        if musicConnector.spotifySongs.isEmpty == false {
-                            SpotifyHomeSignal(songCount: musicConnector.spotifySongs.count)
+                        if musicConnector.visibleSpotifySongCount > 0 {
+                            SpotifyHomeSignal(songCount: musicConnector.visibleSpotifySongCount)
                         }
                     }
                     Spacer()
@@ -218,7 +215,7 @@ struct ContentView: View {
 
                 Spacer()
             }
-            .blur(radius: settingsBackdropBlur + playerBackdropBlur, opaque: false)
+            .blur(radius: sceneBackdropBlur, opaque: false)
             .animation(.smooth(duration: 0.24, extraBounce: 0.0), value: activeTab)
             .animation(.smooth(duration: 0.24, extraBounce: 0.0), value: isPlayerCardVisible)
             .animation(.smooth(duration: 0.24, extraBounce: 0.0), value: isLandscape)
@@ -250,10 +247,16 @@ struct ContentView: View {
                 .padding(.horizontal, 8)
                 .padding(.bottom, 12)
             }
-            .blur(radius: settingsBackdropBlur + playerBackdropBlur, opaque: false)
+            .blur(radius: sceneBackdropBlur, opaque: false)
             .animation(.smooth(duration: 0.24, extraBounce: 0.0), value: activeTab)
             .animation(.smooth(duration: 0.24, extraBounce: 0.0), value: isPlayerCardVisible)
             .zIndex(8)
+
+            if isInitialLibraryLoadingVisible {
+                InitialLibraryLoadingOverlay()
+                    .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                    .zIndex(10)
+            }
 
             if activeTab == .settings {
                 Color.black.opacity(0.48)
@@ -290,6 +293,8 @@ struct ContentView: View {
             musicConnector.stopPlaybackSync()
             pendingHomePlaybackTask?.cancel()
             pendingHomePlaybackTask = nil
+            homeAutoFillTask?.cancel()
+            homeAutoFillTask = nil
             resetHomeFlipState()
             stopHomeDrift()
             shakeObserver.stop()
@@ -318,9 +323,11 @@ struct ContentView: View {
         .onChange(of: homeSongSourceSignature) { _, _ in
             guard isHomeAppendingMore == false else { return }
             syncHomeSongsIfNeeded()
+            ensureHomeHasEnoughSongsIfNeeded()
         }
         .onChange(of: songs.map { "\($0.id):\($0.artworkImage != nil)" }) { _, _ in
             refreshVisibleHomeSongMetadata()
+            ensureHomeHasEnoughSongsIfNeeded()
         }
         .onReceive(shakeObserver.$shakeEventID.dropFirst()) { _ in
             reshuffleHomeSongsWithFlip()
@@ -331,6 +338,7 @@ struct ContentView: View {
         .onChange(of: musicConnector.isConnectedToAnyMusicService) { _, isConnected in
             if isConnected {
                 syncHomeSongsIfNeeded()
+                ensureHomeHasEnoughSongsIfNeeded()
             } else {
                 activeTab = .home
                 isPlayerCardVisible = false
@@ -344,7 +352,7 @@ struct ContentView: View {
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
         registerHomeInteraction()
 
-        guard song.isPlayable, song.isPlaceholder == false else {
+        guard (song.isPlayable || song.source == .spotify), song.isPlaceholder == false else {
             musicConnector.message = "这首暂时没有可播放资源。"
             return
         }
@@ -455,6 +463,7 @@ struct ContentView: View {
         isPlayerCardDismissing = false
         isPlayerCardVisible = true
         musicConnector.loadLyricsIfNeeded(for: playerDisplaySong)
+        ensureHomeHasEnoughSongsIfNeeded()
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) {
             guard isPlayerCardVisible else { return }
@@ -509,6 +518,7 @@ struct ContentView: View {
             rememberRecentlyShownHomeSongs(homeSongs)
             PlayerArtworkWarmupCache.shared.preload(songs: Array(homeSongs.prefix(80)))
             resetHomeFlipState()
+            ensureHomeHasEnoughSongsIfNeeded()
             return
         }
 
@@ -525,6 +535,7 @@ struct ContentView: View {
             return
         }
         appendNewHomeSongsFromSource()
+        ensureHomeHasEnoughSongsIfNeeded()
     }
 
     private func homeSourceSignature(for source: [DemoSong]) -> String {
@@ -551,6 +562,7 @@ struct ContentView: View {
         homeSongs = initialHomeSongs()
         homePendingSongs = homeSongs
         homeFlipVariations = makeHomeFlipVariations(count: homeSongs.count)
+        homeFlippingIndices = Set(homeSongs.indices)
         resetHomeFlipState()
         rememberRecentlyShownHomeSongs(homeSongs)
         PlayerArtworkWarmupCache.shared.preload(songs: Array(homeSongs.prefix(120)))
@@ -587,6 +599,7 @@ struct ContentView: View {
             mediaItem: latest.mediaItem ?? current.mediaItem,
             storeID: latest.storeID ?? current.storeID,
             previewURL: latest.previewURL ?? current.previewURL,
+            spotifyURI: latest.spotifyURI ?? current.spotifyURI,
             artworkImage: artworkImage,
             backdropImage: backdropImage,
             lyricsText: latest.lyricsText ?? current.lyricsText,
@@ -658,13 +671,16 @@ struct ContentView: View {
             seenIDs.insert(song.id)
             return true
         }
-        appendHomeSongsWithoutFlip(additions)
+        appendHomeSongsWithFlip(additions)
     }
 
     private func loadMoreHomeSongsIfNeeded(_ slot: HomeSongSlot) {
-        guard isHomeSurfaceVisible else { return }
+        guard activeTab != .settings else { return }
         guard isHomeLoadingMore == false else { return }
-        guard visibleHomeSongs.count >= 24 else { return }
+        if visibleHomeSongs.count < 24 {
+            ensureHomeHasEnoughSongsIfNeeded()
+            return
+        }
         guard slot.id >= max(visibleHomeSongs.count - 10, 0) else { return }
 
         isHomeLoadingMore = true
@@ -679,33 +695,74 @@ struct ContentView: View {
         }
     }
 
-    private func appendLoadedHomeSongs(_ additions: [DemoSong]) {
-        let appendedCount = appendHomeSongsWithoutFlip(additions)
-        guard appendedCount > 0 else {
-            isHomeLoadingMore = false
-            isHomeAppendingMore = false
+    private func ensureHomeHasEnoughSongsIfNeeded(targetCount: Int = 96) {
+        guard activeTab != .settings else { return }
+        guard isHomeLoadingMore == false else { return }
+        guard visibleHomeSongs.filter({ $0.isHomeSurfacePlayable && $0.isPlaceholder == false }).count < targetCount else { return }
+
+        var seenIDs = Set(visibleHomeSongs.map(\.id))
+        let sourceAdditions = songs.filter { song in
+            guard song.isHomeSurfacePlayable, song.isPlaceholder == false else { return false }
+            guard seenIDs.contains(song.id) == false else { return false }
+            seenIDs.insert(song.id)
+            return true
+        }
+        if sourceAdditions.isEmpty == false {
+            _ = appendHomeSongsWithFlip(sourceAdditions)
             return
         }
 
-        let generation = UUID()
-        homeFlipGeneration = generation
-        isHomeFlipping = false
+        guard visibleHomeSongs.filter({ $0.isHomeSurfacePlayable && $0.isPlaceholder == false }).count < targetCount else { return }
+        homeAutoFillTask?.cancel()
+        isHomeLoadingMore = true
+        isHomeAppendingMore = false
+        let startPage = homeLoadMorePage
+        homeLoadMorePage += 1
 
-        homeFlipTask = Task { @MainActor in
-            let rows = max(1, Int(ceil(Double(appendedCount) / 4.0)))
-            try? await Task.sleep(for: .milliseconds(rows * 42 + 220))
-            guard !Task.isCancelled, homeFlipGeneration == generation else { return }
+        homeAutoFillTask = Task { @MainActor in
+            var page = startPage
+            var attempts = 0
+            while !Task.isCancelled,
+                  activeTab != .settings,
+                  visibleHomeSongs.filter({ $0.isHomeSurfacePlayable && $0.isPlaceholder == false }).count < targetCount,
+                  attempts < 4 {
+                let additions = await musicConnector.loadMoreDiscoverySongs(page: page)
+                guard !Task.isCancelled else { return }
+                let appendedCount = appendHomeSongsWithFlip(additions)
+                attempts += 1
+                page += 1
+                homeLoadMorePage = max(homeLoadMorePage, page)
+                if appendedCount > 0 {
+                    return
+                }
+                if appendedCount == 0 {
+                    try? await Task.sleep(for: .milliseconds(240))
+                }
+            }
             isHomeLoadingMore = false
             isHomeAppendingMore = false
         }
     }
 
+    private func appendLoadedHomeSongs(_ additions: [DemoSong]) {
+        let appendedCount = appendHomeSongsWithFlip(additions)
+        guard appendedCount > 0 else {
+            isHomeLoadingMore = false
+            isHomeAppendingMore = false
+            return
+        }
+    }
+
     @discardableResult
-    private func appendHomeSongsWithoutFlip(_ additions: [DemoSong]) -> Int {
+    private func appendHomeSongsWithFlip(_ additions: [DemoSong]) -> Int {
         guard additions.isEmpty == false else { return 0 }
-        let current = homeSongs.isEmpty ? songs : homeSongs
+        let currentHasOnlyLoadingCards = homeSongs.contains {
+            $0.isPlaceholder || $0.source == .demo || $0.isHomeSurfacePlayable == false
+        }
+        let current = (homeSongs.isEmpty || currentHasOnlyLoadingCards) ? songs : homeSongs
         var seenIDs = Set(current.map(\.id))
         let uniqueAdditions = additions.filter { song in
+            guard song.isHomeSurfacePlayable else { return false }
             guard seenIDs.contains(song.id) == false else { return false }
             seenIDs.insert(song.id)
             return true
@@ -717,10 +774,67 @@ struct ContentView: View {
             overflow: uniqueAdditions,
             limit: uniqueAdditions.count
         )
-        let targetSongs = current + orderedAdditions
+        let baseSongs = currentHasOnlyLoadingCards ? [] : current
+        let targetSongs = baseSongs + orderedAdditions
+        let newCardStart = baseSongs.count
+        let flippingIndices = Set(newCardStart..<targetSongs.count)
+
+        homeFlipTask?.cancel()
         homeSongs = targetSongs
         homePendingSongs = targetSongs
         homeFlipVariations = makeHomeFlipVariations(count: targetSongs.count)
+        homeFlippingIndices = flippingIndices
+        homeAppearingFlipIndices = flippingIndices
+        homeFlipGeneration = UUID()
+        isHomeFlipping = true
+        isHomeAppendingMore = true
+        rememberRecentlyShownHomeSongs(orderedAdditions)
+        PlayerArtworkWarmupCache.shared.preload(songs: Array(orderedAdditions.prefix(80)))
+
+        let generation = homeFlipGeneration
+        homeFlipTask = Task { @MainActor in
+            let rows = max(1, Int(ceil(Double(orderedAdditions.count) / 4.0)))
+            try? await Task.sleep(for: .milliseconds(rows * 70 + 940))
+            guard !Task.isCancelled, homeFlipGeneration == generation else { return }
+            homeSongs = targetSongs
+            homePendingSongs = []
+            homeFlipVariations = [:]
+            homeFlippingIndices = []
+            homeAppearingFlipIndices = []
+            isHomeFlipping = false
+            isHomeLoadingMore = false
+            isHomeAppendingMore = false
+        }
+
+        return orderedAdditions.count
+    }
+
+    @discardableResult
+    private func appendHomeSongsWithoutFlip(_ additions: [DemoSong]) -> Int {
+        guard additions.isEmpty == false else { return 0 }
+        let currentHasOnlyLoadingCards = homeSongs.contains {
+            $0.isPlaceholder || $0.source == .demo || $0.isHomeSurfacePlayable == false
+        }
+        let current = (homeSongs.isEmpty || currentHasOnlyLoadingCards) ? songs : homeSongs
+        var seenIDs = Set(current.map(\.id))
+        let uniqueAdditions = additions.filter { song in
+            guard song.isHomeSurfacePlayable else { return false }
+            guard seenIDs.contains(song.id) == false else { return false }
+            seenIDs.insert(song.id)
+            return true
+        }
+        guard uniqueAdditions.isEmpty == false else { return 0 }
+
+        let orderedAdditions = diversifiedHomeSongs(
+            from: uniqueAdditions,
+            overflow: uniqueAdditions,
+            limit: uniqueAdditions.count
+        )
+        let targetSongs = currentHasOnlyLoadingCards ? orderedAdditions : current + orderedAdditions
+        homeSongs = targetSongs
+        homePendingSongs = targetSongs
+        homeFlipVariations = makeHomeFlipVariations(count: targetSongs.count)
+        homeAppearingFlipIndices = []
         isHomeFlipping = false
         rememberRecentlyShownHomeSongs(orderedAdditions)
         PlayerArtworkWarmupCache.shared.preload(songs: Array(orderedAdditions.prefix(80)))
@@ -744,6 +858,8 @@ struct ContentView: View {
         homeFlipVariations = makeHomeFlipVariations(count: nextSongs.count)
         let generation = UUID()
         homeFlipGeneration = generation
+        homeFlippingIndices = Set(nextSongs.indices)
+        homeAppearingFlipIndices = []
         isHomeFlipping = true
         PlayerArtworkWarmupCache.shared.preload(songs: Array(nextSongs.prefix(120)))
 
@@ -781,6 +897,8 @@ struct ContentView: View {
         homeFlipGeneration = UUID()
         homePendingSongs = []
         homeFlipVariations = [:]
+        homeFlippingIndices = []
+        homeAppearingFlipIndices = []
         isHomeFlipping = false
     }
 
@@ -788,16 +906,16 @@ struct ContentView: View {
         Dictionary(uniqueKeysWithValues: (0..<count).map { index in
             let row = index / 4
             let column = index % 4
-            let rowBase = row * 92
-            let columnScatter = [52, 7, 86, 25][column]
-            let randomScatter = Int.random(in: -20...170)
+            let rowBase = row * 72
+            let columnScatter = [34, 5, 52, 19][column]
+            let randomScatter = Int.random(in: -8...86)
             return (
                 index,
                 HomeFlipVariation(
                     delay: CGFloat(max(0, rowBase + columnScatter + randomScatter)) / 1000,
-                    durationScale: CGFloat.random(in: 0.72...1.48),
-                    tilt: Double.random(in: -7...7),
-                    lift: CGFloat.random(in: -5...6)
+                    durationScale: CGFloat.random(in: 0.92...1.20),
+                    tilt: Double.random(in: -3.6...3.6),
+                    lift: CGFloat.random(in: -2.5...3.5)
                 )
             )
         })
@@ -1544,6 +1662,40 @@ private struct HeaderNowPlayingBadge: View {
     }
 }
 
+private struct InitialLibraryLoadingOverlay: View {
+    var body: some View {
+        ZStack {
+            Rectangle()
+                .fill(.ultraThinMaterial)
+                .ignoresSafeArea()
+
+            Color.black.opacity(0.40)
+                .ignoresSafeArea()
+
+            VStack(spacing: 16) {
+                ProgressView()
+                    .progressViewStyle(.circular)
+                    .tint(.white)
+                    .controlSize(.large)
+
+                VStack(spacing: 10) {
+                    VStack(spacing: 5) {
+                        Text("正在加载曲库")
+                            .font(.system(size: 20, weight: .black))
+                            .foregroundStyle(.white)
+
+                        Text("正在准备可播放歌曲")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.58))
+                    }
+                }
+            }
+            .padding(.horizontal, 32)
+        }
+        .allowsHitTesting(true)
+    }
+}
+
 private struct ProfilePage: View {
     @ObservedObject var connector: MusicConnectionManager
     @Binding var activeTab: AppTab
@@ -1994,7 +2146,9 @@ private final class MusicConnectionManager: ObservableObject {
     @Published var spotifySongs: [DemoSong] = []
     @Published var spotifyPlaylists: [MusicPlaylistOption] = []
     @Published var homeFeedSongs: [DemoSong] = []
+    @Published private(set) var isInitialLibraryLoading = true
     @Published private(set) var isHomeFeedRefreshing = false
+    @Published private(set) var isSpotifyLibraryRefreshing = false
     @Published var recommendedSongs: [DemoSong] = []
     @Published var discoveryExtraSongs: [DemoSong] = []
     @Published var message: String?
@@ -2014,12 +2168,20 @@ private final class MusicConnectionManager: ObservableObject {
     @AppStorage("selectedApplePlaylistID") var selectedApplePlaylistID = MusicPlaylistOption.allID
     @AppStorage("selectedSpotifyPlaylistID") var selectedSpotifyPlaylistID = MusicPlaylistOption.allID
     @AppStorage("aiRecommendationsEnabled") var aiRecommendationsEnabled = true
+    @AppStorage("spotifyPrivacyResetVersion") private var spotifyPrivacyResetVersion = 0
 
     private let spotifyAuthenticator = SpotifyPKCEAuthenticator()
+    private let requiredSpotifyPrivacyResetVersion = 1
     private var playbackLoadingTask: Task<Void, Never>?
     private var queuedPlaybackTask: Task<Void, Never>?
     private var playbackPrefetchTask: Task<Void, Never>?
     private var homeFeedTask: Task<Void, Never>?
+    private var delayedHomeFeedRefreshTask: Task<Void, Never>?
+    private var spotifyStartupRefreshTask: Task<Void, Never>?
+    private var spotifyFullRefreshTask: Task<Void, Never>?
+    private var initialLoadingFinishTask: Task<Void, Never>?
+    private var initialLoadingTimeoutTask: Task<Void, Never>?
+    private var initialLibraryLoadingStartedAt = Date()
     private var homeFeedRequestID = 0
     private var recommendationTask: Task<Void, Never>?
     private var playbackObservers: [NSObjectProtocol] = []
@@ -2048,6 +2210,7 @@ private final class MusicConnectionManager: ObservableObject {
     var discoverySongs: [DemoSong] {
         let baseSongs = librarySongs
         let recommendationSongs = aiRecommendationsEnabled ? recommendedSongs : []
+        let spotifySongs = activeSpotifySongs
         return uniqueDiscoverySongs(
             from: homeFeedSongs + spotifySongs + interleavedDiscoverySongs(librarySongs: baseSongs, recommendedSongs: recommendationSongs) + discoveryExtraSongs
         )
@@ -2055,7 +2218,7 @@ private final class MusicConnectionManager: ObservableObject {
 
     var homeSurfaceSongs: [DemoSong] {
         let recommendationSongs = aiRecommendationsEnabled ? recommendedSongs : []
-        let rotatedSpotifySongs = rotatedHomeSongs(spotifySongs, salt: homeFeedSessionSalt)
+        let rotatedSpotifySongs = rotatedHomeSongs(activeSpotifySongs, salt: homeFeedSessionSalt)
         let rotatedLibrarySongs = rotatedHomeSongs(librarySongs, salt: homeFeedSessionSalt * 0.73 + 19)
         let spotifyFrontDoor = Array(rotatedSpotifySongs.prefix(28))
         let connectedSongs = uniqueDiscoverySongs(
@@ -2071,6 +2234,19 @@ private final class MusicConnectionManager: ObservableObject {
         }
 
         return discoverySongs.filter(\.source.isRealDiscoverySource)
+    }
+
+    private var hasUsableSpotifySession: Bool {
+        guard spotifyAccessToken.isEmpty == false else { return false }
+        return spotifyTokenExpiresAt == 0 || spotifyTokenExpiresAt > Date().timeIntervalSince1970
+    }
+
+    private var activeSpotifySongs: [DemoSong] {
+        hasUsableSpotifySession ? spotifySongs.filter(\.isHomeSurfacePlayable) : []
+    }
+
+    var visibleSpotifySongCount: Int {
+        activeSpotifySongs.count
     }
 
     private func rotatedHomeSongs(_ songs: [DemoSong], salt: Double) -> [DemoSong] {
@@ -2097,7 +2273,7 @@ private final class MusicConnectionManager: ObservableObject {
     }
 
     var isSpotifyReady: Bool {
-        spotifyAccessToken.isEmpty == false
+        hasUsableSpotifySession
     }
 
     var isConnectedToAnyMusicService: Bool {
@@ -2105,7 +2281,7 @@ private final class MusicConnectionManager: ObservableObject {
     }
 
     var spotifyStatusText: String {
-        spotifyAccessToken.isEmpty ? "回调: \(SpotifyAuthConfig.redirectURI)" : "已连接"
+        spotifyAccessToken.isEmpty ? "连接后导入你的 Spotify 歌单" : "已连接，可导入你的 Spotify 歌单"
     }
 
     func disconnectAppleMusic() {
@@ -2125,18 +2301,28 @@ private final class MusicConnectionManager: ObservableObject {
 
     func disconnectSpotify() {
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
-        spotifyAccessToken = ""
-        spotifyRefreshToken = ""
-        spotifyTokenExpiresAt = 0
-        selectedSpotifyPlaylistID = MusicPlaylistOption.allID
-        spotifySongs = []
-        spotifyPlaylists = []
+        clearSpotifyPrivateData()
         clearPlaybackIfNeeded(disconnectedSources: [.spotify])
         refreshHomeFeed()
         if aiRecommendationsEnabled {
             refreshRecommendations()
         }
         message = "已登出 Spotify"
+    }
+
+    private func clearSpotifyPrivateData() {
+        spotifyAccessToken = ""
+        spotifyRefreshToken = ""
+        spotifyTokenExpiresAt = 0
+        selectedSpotifyPlaylistID = MusicPlaylistOption.allID
+        spotifySongs = []
+        spotifyPlaylists = []
+    }
+
+    private func runSpotifyPrivacyMigrationIfNeeded() {
+        guard spotifyPrivacyResetVersion < requiredSpotifyPrivacyResetVersion else { return }
+        clearSpotifyPrivateData()
+        spotifyPrivacyResetVersion = requiredSpotifyPrivacyResetVersion
     }
 
     func connectAppleMusic() async {
@@ -2166,6 +2352,12 @@ private final class MusicConnectionManager: ObservableObject {
     }
 
     func refreshAppleMusicLibraryIfPossible() async {
+        initialLoadingFinishTask?.cancel()
+        initialLoadingTimeoutTask?.cancel()
+        initialLibraryLoadingStartedAt = Date()
+        isInitialLibraryLoading = true
+        scheduleInitialLibraryLoadingTimeout()
+        runSpotifyPrivacyMigrationIfNeeded()
         if appleMusicConnected, MPMediaLibrary.authorizationStatus() == .authorized {
             loadAppleMusicLibrary()
         } else {
@@ -2173,9 +2365,31 @@ private final class MusicConnectionManager: ObservableObject {
             refreshRecommendations()
         }
         refreshHomeFeed()
-        await refreshSpotifySongsIfPossible()
-        refreshHomeFeed()
+        scheduleStartupSpotifyRefreshIfNeeded()
+        scheduleFullHomeFeedRefreshIfNeeded()
         syncPlaybackState()
+    }
+
+    private func finishInitialLibraryLoading() {
+        initialLoadingTimeoutTask?.cancel()
+        initialLoadingFinishTask?.cancel()
+        let elapsed = Date().timeIntervalSince(initialLibraryLoadingStartedAt)
+        let remainingDelay = max(0, 0.72 - elapsed)
+        initialLoadingFinishTask = Task { @MainActor in
+            if remainingDelay > 0 {
+                try? await Task.sleep(for: .milliseconds(Int(remainingDelay * 1_000)))
+            }
+            guard Task.isCancelled == false else { return }
+            isInitialLibraryLoading = false
+        }
+    }
+
+    private func scheduleInitialLibraryLoadingTimeout() {
+        initialLoadingTimeoutTask = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(3))
+            guard Task.isCancelled == false else { return }
+            isInitialLibraryLoading = false
+        }
     }
 
     private func requestMediaLibraryAuthorization() async -> MPMediaLibraryAuthorizationStatus {
@@ -2193,7 +2407,10 @@ private final class MusicConnectionManager: ObservableObject {
         let items = mediaItemsFromLibrary()
         let palettes = DemoSong.library.map(\.colors)
         librarySongs = items.prefix(220).enumerated().map { index, item in
-            let artworkImage = item.artwork?.image(at: CGSize(width: 220, height: 220))
+            let shouldLoadArtworkImmediately = index < 64
+            let artworkImage = shouldLoadArtworkImmediately
+                ? item.artwork?.image(at: CGSize(width: 220, height: 220))
+                : nil
             let magicColor = artworkImage?.magicAverageColor ?? UIColor(songPalette: palettes[index % palettes.count])
             return DemoSong(
                 id: 10_000 + index,
@@ -2204,7 +2421,7 @@ private final class MusicConnectionManager: ObservableObject {
                 storeID: item.safePlaybackStoreID,
                 artworkImage: artworkImage,
                 backdropImage: artworkImage?.playerBackdropImage,
-                lyricsText: Self.extractLyrics(from: item),
+                lyricsText: index < 24 ? Self.extractLyrics(from: item) : nil,
                 magicColor: Color(uiColor: magicColor),
                 source: .library
             )
@@ -2271,8 +2488,18 @@ private final class MusicConnectionManager: ObservableObject {
         return additions
     }
 
-    func refreshSpotifySongsIfPossible(showMessage: Bool = false) async {
-        guard spotifyAccessToken.isEmpty == false else { return }
+    func refreshSpotifySongsIfPossible(
+        showMessage: Bool = false,
+        maxCount: Int = 500,
+        playlistLimit: Int = 50,
+        playlistTrackLimit: Int = 40,
+        hydrateLimit: Int = 96
+    ) async {
+        guard spotifyAccessToken.isEmpty == false else {
+            spotifySongs = []
+            spotifyPlaylists = []
+            return
+        }
 
         do {
             if spotifyTokenExpiresAt > 0,
@@ -2284,15 +2511,21 @@ private final class MusicConnectionManager: ObservableObject {
                 spotifyTokenExpiresAt = Date().addingTimeInterval(TimeInterval(token.expiresIn)).timeIntervalSince1970
             }
 
-            spotifyPlaylists = try await SpotifyWebAPIClient.playlistOptions(accessToken: spotifyAccessToken, limit: 50)
+            let tokenForRequest = spotifyAccessToken
+            let playlists = playlistLimit > 0
+                ? try await SpotifyWebAPIClient.playlistOptions(accessToken: tokenForRequest, limit: playlistLimit)
+                : spotifyPlaylists
             let drafts = try await SpotifyWebAPIClient.discoverySongDrafts(
-                accessToken: spotifyAccessToken,
-                maxCount: 220,
-                playlistID: selectedSpotifyPlaylistID
+                accessToken: tokenForRequest,
+                maxCount: maxCount,
+                playlistID: selectedSpotifyPlaylistID,
+                playlistLimit: playlistLimit,
+                playlistTrackLimit: playlistTrackLimit
             )
-            let initialAppleMatches = await appleCatalogMatches(for: Array(drafts.prefix(48)))
-            spotifySongs = spotifySongs(from: drafts, artworkByID: [:], appleTrackByID: initialAppleMatches)
-            hydrateSpotifyMetadata(for: drafts, initialAppleTrackByID: initialAppleMatches)
+            guard spotifyAccessToken == tokenForRequest else { return }
+            spotifyPlaylists = playlists
+            spotifySongs = spotifySongs(from: drafts, artworkByID: [:], appleTrackByID: [:])
+            hydrateSpotifyMetadata(for: drafts, hydrateLimit: hydrateLimit, tokenSnapshot: tokenForRequest)
             refreshHomeFeed()
             if aiRecommendationsEnabled {
                 refreshRecommendations()
@@ -2301,6 +2534,11 @@ private final class MusicConnectionManager: ObservableObject {
                 message = drafts.isEmpty ? "Spotify 已连接，但没有读到已收藏歌曲或歌单歌曲。" : "已导入 \(drafts.count) 首 Spotify 歌曲到首页"
             }
         } catch {
+            clearSpotifyPrivateData()
+            refreshHomeFeed()
+            if aiRecommendationsEnabled {
+                refreshRecommendations()
+            }
             if showMessage {
                 message = "Spotify 已连接，但暂时没拉到歌单：\(error.localizedDescription)"
             }
@@ -2310,6 +2548,116 @@ private final class MusicConnectionManager: ObservableObject {
     func selectSpotifyPlaylist(_ optionID: String) async {
         selectedSpotifyPlaylistID = optionID
         await refreshSpotifySongsIfPossible(showMessage: true)
+    }
+
+    private func scheduleStartupSpotifyRefreshIfNeeded() {
+        guard hasUsableSpotifySession else { return }
+        spotifyStartupRefreshTask?.cancel()
+        let tokenSnapshot = spotifyAccessToken
+        spotifyStartupRefreshTask = Task { @MainActor in
+            guard spotifyAccessToken == tokenSnapshot else { return }
+            await refreshSpotifySongsIfPossible(maxCount: 36, playlistLimit: 0, playlistTrackLimit: 0, hydrateLimit: 12)
+            guard spotifyAccessToken == tokenSnapshot else { return }
+            scheduleFullSpotifyRefreshIfNeeded()
+        }
+    }
+
+    private func scheduleFullSpotifyRefreshIfNeeded() {
+        guard hasUsableSpotifySession else { return }
+        spotifyFullRefreshTask?.cancel()
+        let tokenSnapshot = spotifyAccessToken
+        spotifyFullRefreshTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(900))
+            guard spotifyAccessToken == tokenSnapshot else { return }
+            isSpotifyLibraryRefreshing = true
+            defer { isSpotifyLibraryRefreshing = false }
+            await refreshSpotifySongsIfPossible(maxCount: 500, playlistLimit: 50, playlistTrackLimit: 40, hydrateLimit: 72)
+        }
+    }
+
+    private func scheduleFullHomeFeedRefreshIfNeeded() {
+        delayedHomeFeedRefreshTask?.cancel()
+        delayedHomeFeedRefreshTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(1_300))
+            guard isInitialLibraryLoading == false, Task.isCancelled == false else { return }
+            refreshHomeFeed()
+        }
+    }
+
+    func openSpotifySong(for song: DemoSong) {
+        guard song.source == .spotify, let spotifyURI = song.spotifyURI else {
+            message = "这首 Spotify 歌缺少打开链接。"
+            return
+        }
+
+        stopPreviewPlayback(clearPlaybackState: true)
+        MPMusicPlayerController.applicationMusicPlayer.stop()
+        currentSong = nil
+        playingSongID = nil
+        isPlaying = false
+        isPlaybackTransitioning = false
+        showPlaybackLoadingToast = false
+
+        let webURL = spotifyWebURL(from: spotifyURI)
+        guard let appURL = URL(string: spotifyURI) else {
+            openExternalURL(webURL, fallback: nil)
+            return
+        }
+
+        UIApplication.shared.open(appURL, options: [:]) { [weak self] didOpen in
+            guard didOpen == false else { return }
+            Task { @MainActor in
+                self?.openExternalURL(webURL, fallback: nil)
+            }
+        }
+        message = "正在打开 Spotify：\(song.title)"
+    }
+
+    private func spotifyWebURL(from spotifyURI: String) -> URL? {
+        guard spotifyURI.hasPrefix("spotify:track:") else { return nil }
+        let trackID = String(spotifyURI.dropFirst("spotify:track:".count))
+        return URL(string: "https://open.spotify.com/track/\(trackID)")
+    }
+
+    private func openExternalURL(_ url: URL?, fallback: URL?) {
+        guard let url else {
+            if let fallback {
+                UIApplication.shared.open(fallback)
+            }
+            return
+        }
+        UIApplication.shared.open(url)
+    }
+
+    func startSpotifyPlayback(for song: DemoSong) async {
+        guard song.source == .spotify, song.spotifyURI != nil else {
+            message = "这首 Spotify 歌缺少播放链接。"
+            return
+        }
+        guard spotifyAccessToken.isEmpty == false else {
+            message = "请先连接 Spotify。"
+            return
+        }
+
+        currentSong = song
+        playingSongID = song.id
+        isPlaying = false
+        endPlaybackLoading()
+        playingSongID = nil
+        currentSong = nil
+        message = "Spotify 播放暂时不可用，我先保住 Apple Music 播放不闪退。"
+    }
+
+    private func currentSpotifyAccessToken() async throws -> String {
+        if spotifyTokenExpiresAt > 0,
+           spotifyTokenExpiresAt - Date().timeIntervalSince1970 < 120,
+           spotifyRefreshToken.isEmpty == false {
+            let token = try await spotifyAuthenticator.refreshAccessToken(refreshToken: spotifyRefreshToken)
+            spotifyAccessToken = token.accessToken
+            spotifyRefreshToken = token.refreshToken ?? spotifyRefreshToken
+            spotifyTokenExpiresAt = Date().addingTimeInterval(TimeInterval(token.expiresIn)).timeIntervalSince1970
+        }
+        return spotifyAccessToken
     }
 
     private func spotifySongs(
@@ -2328,8 +2676,9 @@ private final class MusicConnectionManager: ObservableObject {
                 title: draft.title,
                 artist: draft.artist,
                 colors: palette,
-                storeID: matchedTrack?.trackID,
+                storeID: nil,
                 previewURL: draft.previewURL ?? matchedTrack?.previewURL,
+                spotifyURI: draft.spotifyURI,
                 artworkImage: artworkImage,
                 backdropImage: artworkImage?.playerBackdropImage,
                 magicColor: Color(uiColor: magicColor),
@@ -2338,15 +2687,23 @@ private final class MusicConnectionManager: ObservableObject {
         }
     }
 
-    private func hydrateSpotifyMetadata(for drafts: [SpotifySongDraft], initialAppleTrackByID: [String: ITunesTrack] = [:]) {
+    private func hydrateSpotifyMetadata(
+        for drafts: [SpotifySongDraft],
+        initialAppleTrackByID: [String: ITunesTrack] = [:],
+        hydrateLimit: Int = 96,
+        tokenSnapshot: String
+    ) {
         Task { @MainActor in
-            guard spotifyAccessToken.isEmpty == false else { return }
-            let imageDrafts = Array(drafts.prefix(24))
+            guard spotifyAccessToken == tokenSnapshot else { return }
+            let playbackDrafts = Array(drafts.prefix(hydrateLimit))
+            let artworkDraftIDs = Set(drafts.prefix(min(24, hydrateLimit)).map(\.id))
             var artworkByID: [String: UIImage] = [:]
             var appleTrackByID = initialAppleTrackByID
-            for draft in imageDrafts {
-                guard spotifyAccessToken.isEmpty == false else { return }
-                async let spotifyArtwork = ITunesSearchClient.artworkImage(from: draft.artworkURL)
+            for (index, draft) in playbackDrafts.enumerated() {
+                guard spotifyAccessToken == tokenSnapshot else { return }
+                async let spotifyArtwork = artworkDraftIDs.contains(draft.id)
+                    ? ITunesSearchClient.artworkImage(from: draft.artworkURL)
+                    : nil
                 let appleMatch: ITunesTrack?
                 if let existingMatch = appleTrackByID[draft.id] {
                     appleMatch = existingMatch
@@ -2363,22 +2720,13 @@ private final class MusicConnectionManager: ObservableObject {
                 if let image = resolvedArtwork {
                     artworkByID[draft.id] = image
                 }
-                if (artworkByID.count + appleTrackByID.count).isMultiple(of: 6) || draft.id == imageDrafts.last?.id {
-                    guard spotifyAccessToken.isEmpty == false else { return }
+                if index < 16 || index.isMultiple(of: 8) || draft.id == playbackDrafts.last?.id {
+                    guard spotifyAccessToken == tokenSnapshot else { return }
                     spotifySongs = spotifySongs(from: drafts, artworkByID: artworkByID, appleTrackByID: appleTrackByID)
                     refreshHomeFeed()
                 }
             }
         }
-    }
-
-    private func appleCatalogMatches(for drafts: [SpotifySongDraft]) async -> [String: ITunesTrack] {
-        var matches: [String: ITunesTrack] = [:]
-        for draft in drafts {
-            guard let match = await bestAppleCatalogMatch(for: draft) else { continue }
-            matches[draft.id] = match
-        }
-        return matches
     }
 
     private func bestAppleCatalogMatch(for draft: SpotifySongDraft) async -> ITunesTrack? {
@@ -2401,6 +2749,61 @@ private final class MusicConnectionManager: ObservableObject {
             }
         }
         return nil
+    }
+
+    private func resolvedSpotifySong(_ song: DemoSong) async -> DemoSong? {
+        guard song.source == .spotify else { return nil }
+        if song.isPlayable { return song }
+
+        let draft = SpotifySongDraft(
+            id: String(song.id),
+            title: song.title,
+            artist: song.artist,
+            artworkURL: nil,
+            previewURL: song.previewURL,
+            spotifyURI: song.spotifyURI ?? "spotify:track:\(song.id)"
+        )
+        guard let track = await bestAppleCatalogMatch(for: draft),
+              let previewURL = track.previewURL else {
+            return nil
+        }
+
+        let downloadedArtwork = song.artworkImage == nil
+            ? await ITunesSearchClient.artworkImage(from: track.artworkURL100)
+            : nil
+        let artworkImage = song.artworkImage ?? downloadedArtwork
+        let magicColor = artworkImage?.magicAverageColor.map(Color.init(uiColor:)) ?? song.magicColor
+        let resolvedSong = DemoSong(
+            id: song.id,
+            title: song.title,
+            artist: song.artist,
+            colors: song.colors,
+            mediaItem: song.mediaItem,
+            storeID: nil,
+            previewURL: song.previewURL ?? previewURL,
+            spotifyURI: song.spotifyURI,
+            artworkImage: artworkImage,
+            backdropImage: artworkImage?.playerBackdropImage ?? song.backdropImage,
+            lyricsText: song.lyricsText,
+            magicColor: magicColor,
+            source: song.source
+        )
+        guard resolvedSong.isPlayable else { return nil }
+        replaceSpotifySong(song, with: resolvedSong)
+        return resolvedSong
+    }
+
+    private func replaceSpotifySong(_ oldSong: DemoSong, with newSong: DemoSong) {
+        var didReplace = false
+        spotifySongs = spotifySongs.map { candidate in
+            guard isSameSong(candidate, oldSong) else { return candidate }
+            didReplace = true
+            return newSong
+        }
+        if didReplace == false {
+            spotifySongs.insert(newSong, at: 0)
+        }
+        refreshHomeFeed()
     }
 
     private func spotifySongID(for draft: SpotifySongDraft, fallback: Int) -> Int {
@@ -2561,6 +2964,10 @@ private final class MusicConnectionManager: ObservableObject {
 
     private func queuePlayback(for song: DemoSong, in queueSongs: [DemoSong]? = nil, randomizeQueue: Bool) {
         guard song.isPlayable else {
+            if song.source == .spotify {
+                queueSpotifyPlaybackAfterResolving(song, in: queueSongs, randomizeQueue: randomizeQueue)
+                return
+            }
             message = "这首是 AI 推荐，暂时没有可播放资源。"
             return
         }
@@ -2594,6 +3001,53 @@ private final class MusicConnectionManager: ObservableObject {
             setPlaybackQueue(on: player, startingWith: song, in: queueSnapshot)
             prepareAndStartPlayback(on: player, song: song, queueSongs: queueSnapshot, requestID: requestID)
         }
+    }
+
+    private func queueSpotifyPlaybackAfterResolving(_ song: DemoSong, in queueSongs: [DemoSong]?, randomizeQueue: Bool) {
+        beginPlaybackLoading()
+        queuedPlaybackTask?.cancel()
+        autoAdvanceTask?.cancel()
+        autoAdvanceTask = nil
+        playbackPrefetchTask?.cancel()
+        playbackRequestID &+= 1
+        let requestID = playbackRequestID
+        playingSongID = song.id
+        currentSong = song
+        isPlaying = true
+        message = "正在准备 Spotify 歌曲..."
+
+        queuedPlaybackTask = Task { @MainActor in
+            guard let resolvedSong = await resolvedSpotifySong(song),
+                  !Task.isCancelled,
+                  requestID == playbackRequestID else {
+                if requestID == playbackRequestID {
+                    endPlaybackLoading(requestID: requestID)
+                    isPlaying = false
+                    playingSongID = nil
+                    if song.spotifyURI != nil {
+                        openSpotifySong(for: song)
+                    } else {
+                        message = "这首 Spotify 歌暂时没有可播放预览。"
+                    }
+                }
+                return
+            }
+
+            let resolvedQueue = replacingSong(song, with: resolvedSong, in: queueSongs)
+            queuedPlaybackTask = nil
+            queuePlayback(for: resolvedSong, in: resolvedQueue, randomizeQueue: randomizeQueue)
+        }
+    }
+
+    private func replacingSong(_ oldSong: DemoSong, with newSong: DemoSong, in queueSongs: [DemoSong]?) -> [DemoSong]? {
+        guard let queueSongs else { return nil }
+        var didReplace = false
+        let resolvedSongs = queueSongs.map { candidate in
+            guard isSameSong(candidate, oldSong) else { return candidate }
+            didReplace = true
+            return newSong
+        }
+        return didReplace ? resolvedSongs : [newSong] + resolvedSongs
     }
 
     private func playbackQueueCommitDelay() -> Int {
@@ -2871,7 +3325,13 @@ private final class MusicConnectionManager: ObservableObject {
         requestID: Int
     ) {
         guard song.hasApplePlaybackSource else {
-            startPreviewPlayback(for: song, in: queueSongs, requestID: requestID)
+            if startPreviewPlayback(for: song, in: queueSongs, requestID: requestID) {
+                return
+            }
+            endPlaybackLoading(requestID: requestID)
+            isPlaying = false
+            playingSongID = nil
+            message = "这首歌暂时没有可播放预览。"
             return
         }
 
@@ -2898,7 +3358,12 @@ private final class MusicConnectionManager: ObservableObject {
                           self.playingSongID == song.id,
                           self.previewSongID == nil,
                           player.playbackState != .playing else { return }
-                    _ = self.startPreviewPlayback(for: song, in: queueSongs, requestID: requestID)
+                    if self.startPreviewPlayback(for: song, in: queueSongs, requestID: requestID) == false {
+                        self.endPlaybackLoading(requestID: requestID)
+                        self.isPlaying = false
+                        self.playingSongID = nil
+                        self.message = "这首歌暂时没有可播放预览。"
+                    }
                 }
             }
         }
@@ -3264,11 +3729,18 @@ private final class MusicConnectionManager: ObservableObject {
         homeFeedRequestID &+= 1
 
         let seedSongs = homeFeedSeedSongs()
+        if isInitialLibraryLoading, seedSongs.isEmpty {
+            isHomeFeedRefreshing = false
+            return
+        }
         let sessionSalt = homeFeedSessionSalt
         let requestID = homeFeedRequestID
         let provisionalFeed = provisionalHomeFeedSongs(sessionSalt: sessionSalt)
         if homeFeedSongs.isEmpty, provisionalFeed.isEmpty == false {
             homeFeedSongs = provisionalFeed
+        }
+        if isInitialLibraryLoading, provisionalFeed.contains(where: \.isHomeSurfacePlayable) {
+            finishInitialLibraryLoading()
         }
 
         isHomeFeedRefreshing = true
@@ -3276,6 +3748,7 @@ private final class MusicConnectionManager: ObservableObject {
             let feed = await fetchHomeFeedSongs(seedSongs: seedSongs, sessionSalt: sessionSalt, requestID: requestID)
             guard requestID == homeFeedRequestID else { return }
             isHomeFeedRefreshing = false
+            finishInitialLibraryLoading()
             guard !Task.isCancelled else { return }
             if feed.isEmpty == false {
                 homeFeedSongs = feed
@@ -3308,6 +3781,7 @@ private final class MusicConnectionManager: ObservableObject {
     }
 
     private func fetchHomeFeedSongs(seedSongs: [DemoSong], sessionSalt: Double, requestID: Int) async -> [DemoSong] {
+        let isStartupPass = isInitialLibraryLoading
         let storefronts = homeFeedStorefronts(sessionSalt: sessionSalt)
         let profile = musicTasteProfile(from: seedSongs)
         let spotifyLayer = homeFeedShuffledSongs(
@@ -3318,7 +3792,8 @@ private final class MusicConnectionManager: ObservableObject {
         let chartLayers = await fetchHomeChartLayers(
             storefronts: storefronts,
             seedSongs: seedSongs,
-            profile: profile
+            profile: profile,
+            maxStorefronts: isStartupPass ? 2 : 8
         )
         let chartSongs = uniqueDiscoverySongs(from: chartLayers.flatMap { $0 })
         let chartFeed = blendedHomeFeedSongs(
@@ -3329,15 +3804,29 @@ private final class MusicConnectionManager: ObservableObject {
         )
         if requestID == homeFeedRequestID, Task.isCancelled == false, chartFeed.isEmpty == false {
             homeFeedSongs = chartFeed
+            if isStartupPass {
+                finishInitialLibraryLoading()
+                return chartFeed
+            }
         }
         let frontDoorSongs = await fetchAppleCatalogSongs(
-            queries: homeFeedFrontDoorQueries(from: profile),
+            queries: Array(homeFeedFrontDoorQueries(from: profile).prefix(isStartupPass ? 4 : 12)),
             seedSongs: seedSongs + chartSongs,
-            maxCount: 34,
+            maxCount: isStartupPass ? 16 : 34,
             idBase: 1_100_000,
             profile: profile,
             storefronts: storefronts
         )
+        if isStartupPass {
+            let startupFeed = blendedHomeFeedSongs(
+                layers: [spotifyLayer] + chartLayers + [frontDoorSongs],
+                seedSongs: seedSongs,
+                profile: profile,
+                sessionSalt: sessionSalt
+            )
+            finishInitialLibraryLoading()
+            return startupFeed
+        }
         let latestSongs = await fetchAppleCatalogSongs(
             queries: homeFeedLatestQueries(from: profile),
             seedSongs: seedSongs + frontDoorSongs + chartSongs,
@@ -3366,12 +3855,13 @@ private final class MusicConnectionManager: ObservableObject {
     private func fetchHomeChartLayers(
         storefronts: [String],
         seedSongs: [DemoSong],
-        profile: MusicTasteProfile
+        profile: MusicTasteProfile,
+        maxStorefronts: Int = 8
     ) async -> [[DemoSong]] {
         var layers: [[DemoSong]] = []
         var accumulatedSongs = seedSongs
 
-        for (index, storefront) in storefronts.prefix(8).enumerated() {
+        for (index, storefront) in storefronts.prefix(maxStorefronts).enumerated() {
             let layer = await fetchAppleChartSongs(
                 storefront: storefront,
                 seedSongs: accumulatedSongs,
@@ -4167,8 +4657,7 @@ private final class MusicConnectionManager: ObservableObject {
     func connectSpotify() async {
         guard !isConnectingSpotify else { return }
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
-        UIPasteboard.general.string = SpotifyAuthConfig.redirectURI
-        message = "已复制 Spotify 回调地址：\(SpotifyAuthConfig.redirectURI)"
+        message = "正在连接 Spotify..."
         isConnectingSpotify = true
         defer { isConnectingSpotify = false }
 
@@ -4180,11 +4669,7 @@ private final class MusicConnectionManager: ObservableObject {
             spotifyTokenExpiresAt = Date().addingTimeInterval(TimeInterval(token.expiresIn)).timeIntervalSince1970
             await refreshSpotifySongsIfPossible(showMessage: true)
         } catch {
-            message = """
-            \(error.localizedDescription)
-            Client ID: \(SpotifyAuthConfig.clientID)
-            Redirect: \(SpotifyAuthConfig.redirectURI)
-            """
+            message = "Spotify 授权失败：\(error.localizedDescription)"
         }
     }
 
@@ -4226,17 +4711,36 @@ private enum SpotifyAuthError: LocalizedError {
     }
 }
 
-private enum SpotifyAuthConfig {
+enum SpotifyAuthConfig {
     static let clientID = "bfa6de6c24d148db906470a5a4bf0345"
     static let redirectPort: UInt16 = 8888
     static let redirectPath = "/callback"
     static let redirectURI = "http://127.0.0.1:8888/callback"
+    static let appRemoteRedirectURI = "musicfind://spotify-login-callback"
     static let scopes = [
-        "user-read-email",
-        "user-read-private",
         "user-library-read",
         "playlist-read-private"
     ]
+}
+
+private enum SpotifyPlaybackError: LocalizedError {
+    case noActiveDevice
+    case premiumRequired
+    case missingPlaybackScope
+    case playbackFailed(Int)
+
+    var errorDescription: String? {
+        switch self {
+        case .noActiveDevice:
+            return "没有可用的 Spotify 播放设备。"
+        case .premiumRequired:
+            return "Spotify 远程播放需要 Premium。"
+        case .missingPlaybackScope:
+            return "Spotify 缺少播放控制授权。"
+        case let .playbackFailed(statusCode):
+            return "Spotify 播放失败：\(statusCode)"
+        }
+    }
 }
 
 private enum SpotifyWebAPIClient {
@@ -4256,7 +4760,9 @@ private enum SpotifyWebAPIClient {
     static func discoverySongDrafts(
         accessToken: String,
         maxCount: Int,
-        playlistID: String
+        playlistID: String,
+        playlistLimit: Int = 50,
+        playlistTrackLimit: Int = 40
     ) async throws -> [SpotifySongDraft] {
         if playlistID != MusicPlaylistOption.allID {
             return songDrafts(
@@ -4265,9 +4771,9 @@ private enum SpotifyWebAPIClient {
             )
         }
 
-        async let savedTracks = savedTracks(accessToken: accessToken, limit: 160)
-        async let playlistTracks = tracksFromCurrentUserPlaylists(accessToken: accessToken, playlistLimit: 24, trackLimit: 20)
-        let tracks = try await savedTracks + playlistTracks
+        async let savedTracks = (try? savedTracks(accessToken: accessToken, limit: min(maxCount, 500))) ?? []
+        async let playlistTracks = (try? tracksFromCurrentUserPlaylists(accessToken: accessToken, playlistLimit: playlistLimit, trackLimit: playlistTrackLimit)) ?? []
+        let tracks = await savedTracks + playlistTracks
         return songDrafts(from: tracks, maxCount: maxCount)
     }
 
@@ -4300,19 +4806,52 @@ private enum SpotifyWebAPIClient {
         playlistLimit: Int,
         trackLimit: Int
     ) async throws -> [SpotifyTrack] {
-        var components = URLComponents(string: "https://api.spotify.com/v1/me/playlists")
-        components?.queryItems = [
-            URLQueryItem(name: "limit", value: "\(playlistLimit)")
-        ]
-        guard let url = components?.url else { return [] }
-
-        let response = try await get(SpotifyPlaylistsResponse.self, url: url, accessToken: accessToken)
+        let playlists = try await currentUserPlaylists(accessToken: accessToken, limit: playlistLimit)
         var tracks: [SpotifyTrack] = []
-        for playlist in response.items.prefix(playlistLimit) {
+        let batchSize = 8
+        let selectedPlaylists = Array(playlists.prefix(playlistLimit))
+        for batchStart in stride(from: 0, to: selectedPlaylists.count, by: batchSize) {
             guard tracks.count < playlistLimit * trackLimit else { break }
-            tracks.append(contentsOf: try await playlistTracks(accessToken: accessToken, playlistID: playlist.id, limit: trackLimit))
+            let batch = Array(selectedPlaylists[batchStart..<min(batchStart + batchSize, selectedPlaylists.count)])
+            let batchTracks = await withTaskGroup(of: [SpotifyTrack].self) { group in
+                for playlist in batch {
+                    group.addTask {
+                        (try? await playlistTracks(accessToken: accessToken, playlistID: playlist.id, limit: trackLimit)) ?? []
+                    }
+                }
+
+                var result: [SpotifyTrack] = []
+                for await playlistTracks in group {
+                    result.append(contentsOf: playlistTracks)
+                }
+                return result
+            }
+            tracks.append(contentsOf: batchTracks)
         }
         return tracks
+    }
+
+    private static func currentUserPlaylists(accessToken: String, limit: Int) async throws -> [SpotifyPlaylistSummary] {
+        var playlists: [SpotifyPlaylistSummary] = []
+        var offset = 0
+        let pageSize = 50
+
+        while playlists.count < limit {
+            var components = URLComponents(string: "https://api.spotify.com/v1/me/playlists")
+            components?.queryItems = [
+                URLQueryItem(name: "limit", value: "\(min(pageSize, limit - playlists.count))"),
+                URLQueryItem(name: "offset", value: "\(offset)")
+            ]
+            guard let url = components?.url else { break }
+
+            let response = try await get(SpotifyPlaylistsResponse.self, url: url, accessToken: accessToken)
+            guard response.items.isEmpty == false else { break }
+            playlists.append(contentsOf: response.items)
+            offset += pageSize
+            if response.next == nil { break }
+        }
+
+        return playlists
     }
 
     private static func playlistTracks(accessToken: String, playlistID: String, limit: Int) async throws -> [SpotifyTrack] {
@@ -4340,13 +4879,93 @@ private enum SpotifyWebAPIClient {
     }
 
     private static func get<T: Decodable>(_ type: T.Type, url: URL, accessToken: String) async throws -> T {
-        var request = URLRequest(url: url)
+        var request = URLRequest(url: url, timeoutInterval: 7)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let httpResponse = response as? HTTPURLResponse, (200..<300).contains(httpResponse.statusCode) else {
             throw SpotifyAuthError.invalidTokenResponse
         }
         return try JSONDecoder().decode(type, from: data)
+    }
+
+    static func startPlayback(accessToken: String, trackURI: String, device: SpotifyDevice?) async throws {
+        var components = URLComponents(string: "https://api.spotify.com/v1/me/player/play")
+        if let deviceID = device?.id {
+            try await transferPlayback(accessToken: accessToken, deviceID: deviceID)
+            components?.queryItems = [
+                URLQueryItem(name: "device_id", value: deviceID)
+            ]
+        }
+        guard let url = components?.url else { return }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "PUT"
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(SpotifyStartPlaybackRequest(uris: [trackURI]))
+
+        let (_, response) = try await URLSession.shared.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else { return }
+        switch httpResponse.statusCode {
+        case 200..<300:
+            return
+        case 403:
+            throw SpotifyPlaybackError.premiumRequired
+        case 404:
+            throw SpotifyPlaybackError.noActiveDevice
+        default:
+            throw SpotifyPlaybackError.playbackFailed(httpResponse.statusCode)
+        }
+    }
+
+    static func preferredPlaybackDevice(accessToken: String) async throws -> SpotifyDevice? {
+        guard let url = URL(string: "https://api.spotify.com/v1/me/player/devices") else { return nil }
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else { return nil }
+        switch httpResponse.statusCode {
+        case 200..<300:
+            let response = try JSONDecoder().decode(SpotifyDevicesResponse.self, from: data)
+            let playableDevices = response.devices.filter { $0.id != nil && $0.isRestricted == false }
+            guard playableDevices.isEmpty == false else {
+                throw SpotifyPlaybackError.noActiveDevice
+            }
+            return playableDevices.first { $0.type.localizedCaseInsensitiveContains("smartphone") && $0.isActive }
+                ?? playableDevices.first { $0.type.localizedCaseInsensitiveContains("smartphone") }
+                ?? playableDevices.first { $0.name.localizedCaseInsensitiveContains("iPhone") && $0.isActive }
+                ?? playableDevices.first { $0.name.localizedCaseInsensitiveContains("iPhone") }
+                ?? playableDevices.first { $0.isActive }
+                ?? playableDevices.first
+        case 403:
+            throw SpotifyPlaybackError.missingPlaybackScope
+        default:
+            return nil
+        }
+    }
+
+    private static func transferPlayback(accessToken: String, deviceID: String) async throws {
+        guard let url = URL(string: "https://api.spotify.com/v1/me/player") else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "PUT"
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(SpotifyTransferPlaybackRequest(deviceIDs: [deviceID], play: false))
+
+        let (_, response) = try await URLSession.shared.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else { return }
+        switch httpResponse.statusCode {
+        case 200..<300:
+            return
+        case 403:
+            throw SpotifyPlaybackError.premiumRequired
+        case 404:
+            throw SpotifyPlaybackError.noActiveDevice
+        default:
+            throw SpotifyPlaybackError.playbackFailed(httpResponse.statusCode)
+        }
     }
 
     private static func songDrafts(from tracks: [SpotifyTrack], maxCount: Int) -> [SpotifySongDraft] {
@@ -4364,7 +4983,8 @@ private enum SpotifyWebAPIClient {
                     title: track.name,
                     artist: artist.isEmpty ? "Spotify" : artist,
                     artworkURL: track.album?.images.first?.url,
-                    previewURL: track.previewURL
+                    previewURL: track.previewURL,
+                    spotifyURI: "spotify:track:\(track.id)"
                 )
             )
         }
@@ -4379,6 +4999,41 @@ private struct SpotifySongDraft: Identifiable {
     let artist: String
     let artworkURL: String?
     let previewURL: String?
+    let spotifyURI: String
+}
+
+private struct SpotifyStartPlaybackRequest: Encodable {
+    let uris: [String]
+}
+
+private struct SpotifyTransferPlaybackRequest: Encodable {
+    let deviceIDs: [String]
+    let play: Bool
+
+    private enum CodingKeys: String, CodingKey {
+        case deviceIDs = "device_ids"
+        case play
+    }
+}
+
+private struct SpotifyDevicesResponse: Decodable {
+    let devices: [SpotifyDevice]
+}
+
+private struct SpotifyDevice: Decodable {
+    let id: String?
+    let name: String
+    let type: String
+    let isActive: Bool
+    let isRestricted: Bool
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case type
+        case isActive = "is_active"
+        case isRestricted = "is_restricted"
+    }
 }
 
 private struct SpotifySavedTracksResponse: Decodable {
@@ -4401,6 +5056,7 @@ private struct SpotifySavedTrackItem: Decodable {
 
 private struct SpotifyPlaylistsResponse: Decodable {
     let items: [SpotifyPlaylistSummary]
+    let next: String?
 }
 
 private struct SpotifyPlaylistSummary: Decodable {
@@ -7913,7 +8569,8 @@ private enum ITunesSearchClient {
         ]
         guard let url = components?.url else { return [] }
 
-        let (data, _) = try await URLSession.shared.data(from: url)
+        let request = URLRequest(url: url, timeoutInterval: 5)
+        let (data, _) = try await URLSession.shared.data(for: request)
         let response = try JSONDecoder().decode(ITunesSearchResponse.self, from: data)
         return response.results
     }
@@ -7925,7 +8582,8 @@ private enum ITunesSearchClient {
         }
 
         do {
-            let (data, _) = try await URLSession.shared.data(from: url)
+            let request = URLRequest(url: url, timeoutInterval: 5)
+            let (data, _) = try await URLSession.shared.data(for: request)
             return UIImage(data: data)
         } catch {
             return nil
@@ -8121,7 +8779,7 @@ private extension MPMediaItem {
     }
 }
 
-private struct DemoSong: Identifiable {
+private struct DemoSong: Identifiable, Equatable {
     let id: Int
     let title: String
     let artist: String
@@ -8129,6 +8787,7 @@ private struct DemoSong: Identifiable {
     let mediaItem: MPMediaItem?
     let storeID: String?
     let previewURL: String?
+    let spotifyURI: String?
     let artworkImage: UIImage?
     let backdropImage: UIImage?
     let lyricsText: String?
@@ -8143,6 +8802,7 @@ private struct DemoSong: Identifiable {
         mediaItem: MPMediaItem? = nil,
         storeID: String? = nil,
         previewURL: String? = nil,
+        spotifyURI: String? = nil,
         artworkImage: UIImage? = nil,
         backdropImage: UIImage? = nil,
         lyricsText: String? = nil,
@@ -8156,6 +8816,7 @@ private struct DemoSong: Identifiable {
         self.mediaItem = mediaItem
         self.storeID = storeID
         self.previewURL = previewURL
+        self.spotifyURI = spotifyURI
         self.artworkImage = artworkImage
         self.backdropImage = backdropImage
         self.lyricsText = lyricsText
@@ -8165,6 +8826,22 @@ private struct DemoSong: Identifiable {
 
     var isPlayable: Bool {
         hasApplePlaybackSource || previewURL != nil
+    }
+
+    var isHomeSurfacePlayable: Bool {
+        mediaItem != nil || previewURL != nil
+    }
+
+    static func == (lhs: DemoSong, rhs: DemoSong) -> Bool {
+        lhs.id == rhs.id &&
+        lhs.title == rhs.title &&
+        lhs.artist == rhs.artist &&
+        lhs.storeID == rhs.storeID &&
+        lhs.previewURL == rhs.previewURL &&
+        lhs.spotifyURI == rhs.spotifyURI &&
+        lhs.source == rhs.source &&
+        (lhs.artworkImage != nil) == (rhs.artworkImage != nil) &&
+        (lhs.backdropImage != nil) == (rhs.backdropImage != nil)
     }
 
     var hasApplePlaybackSource: Bool {
@@ -8297,6 +8974,7 @@ private struct HomeInteractiveSongSquare: View {
     let isPlaying: Bool
     let gravity: HomeCoverGravity
     let isFlipping: Bool
+    let isAppearing: Bool
     let flipGeneration: UUID
     let variation: HomeFlipVariation
     let onTap: () -> Void
@@ -8309,6 +8987,7 @@ private struct HomeInteractiveSongSquare: View {
                 backSong: backSong,
                 isPlaying: isPlaying,
                 isFlipping: isFlipping,
+                isAppearing: isAppearing,
                 flipGeneration: flipGeneration,
                 variation: variation
             )
@@ -8518,25 +9197,15 @@ private struct HomeFlipSongSquare: View {
     let backSong: DemoSong
     let isPlaying: Bool
     let isFlipping: Bool
+    let isAppearing: Bool
     let flipGeneration: UUID
     let variation: HomeFlipVariation
     @State private var progress: CGFloat = 0
 
     var body: some View {
-        ZStack {
-            if progress < 0.5 {
-                SongSquare(song: frontSong, isPlaying: isPlaying)
-            } else {
-                SongSquare(song: backSong, isPlaying: isPlaying)
-                    .rotation3DEffect(
-                        .degrees(180),
-                        axis: (x: 1, y: 0, z: 0),
-                        perspective: 0.72
-                    )
-            }
-        }
+        cardBody
         .rotation3DEffect(
-            .degrees(flipRotation),
+            .degrees(isAppearing ? 0 : flipRotation),
             axis: (x: 1, y: 0, z: 0),
             anchor: .center,
             perspective: 0.72
@@ -8557,6 +9226,34 @@ private struct HomeFlipSongSquare: View {
         Double(progress * 180)
     }
 
+    @ViewBuilder
+    private var cardBody: some View {
+        if isAppearing {
+            SongSquare(song: backSong, isPlaying: isPlaying)
+                .opacity(Double(progress))
+                .scaleEffect(0.975 + progress * 0.025)
+                .rotation3DEffect(
+                    .degrees(-72 + Double(progress) * 72),
+                    axis: (x: 1, y: 0, z: 0),
+                    anchor: .center,
+                    perspective: 0.72
+                )
+        } else {
+            ZStack {
+                if progress < 0.5 {
+                    SongSquare(song: frontSong, isPlaying: isPlaying)
+                } else {
+                    SongSquare(song: backSong, isPlaying: isPlaying)
+                        .rotation3DEffect(
+                            .degrees(180),
+                            axis: (x: 1, y: 0, z: 0),
+                            perspective: 0.72
+                        )
+                }
+            }
+        }
+    }
+
     @MainActor
     private func runFlipIfNeeded() async {
         guard isFlipping else {
@@ -8569,8 +9266,11 @@ private struct HomeFlipSongSquare: View {
             try? await Task.sleep(for: .milliseconds(delayMs))
         }
         guard Task.isCancelled == false else { return }
-        let duration = Double(variation.durationScale) * 0.48
-        withAnimation(.interactiveSpring(response: duration, dampingFraction: 0.78, blendDuration: 0.02)) {
+        let duration = Double(variation.durationScale) * (isAppearing ? 0.62 : 0.54)
+        let animation: Animation = isAppearing
+            ? .smooth(duration: duration, extraBounce: 0.0)
+            : .interactiveSpring(response: duration, dampingFraction: 0.88, blendDuration: 0.02)
+        withAnimation(animation) {
             progress = 1
         }
     }
