@@ -9,9 +9,20 @@ import SwiftUI
 import UIKit
 import Combine
 
+final class SpotifyCallbackAppDelegate: NSObject, UIApplicationDelegate {
+    func application(
+        _ app: UIApplication,
+        open url: URL,
+        options: [UIApplication.OpenURLOptionsKey: Any] = [:]
+    ) -> Bool {
+        SpotifyAppRemoteController.shared.handleCallbackURL(url)
+    }
+}
+
 @main
 struct musicfindApp: App {
     @Environment(\.scenePhase) private var scenePhase
+    @UIApplicationDelegateAdaptor(SpotifyCallbackAppDelegate.self) private var appDelegate
     @StateObject private var chargingSleepGuard = ChargingSleepGuard()
 
     var body: some Scene {
@@ -40,10 +51,18 @@ struct musicfindApp: App {
                 }
             }
                 .onAppear { print("[BOOT] WindowGroup appeared") }
+                .onOpenURL { url in
+                    _ = SpotifyAppRemoteController.shared.handleCallbackURL(url)
+                }
         }
-        .onChange(of: scenePhase) { phase in
+        .onChange(of: scenePhase) { _, phase in
             print("[BOOT] scenePhase:", String(describing: phase))
             chargingSleepGuard.updateScenePhase(phase)
+            if phase == .active {
+                SpotifyAppRemoteController.shared.reconnectIfAuthorized()
+            } else {
+                SpotifyAppRemoteController.shared.disconnect()
+            }
         }
     }
 }

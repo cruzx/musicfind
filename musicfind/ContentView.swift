@@ -44,7 +44,6 @@ struct ContentView: View {
     @State private var homeSourceSignature = ""
     @AppStorage("homeDislikedSongKeys") private var homeDislikedSongKeysRaw = ""
     @AppStorage("homeRecentlyShownSongKeys") private var homeRecentlyShownSongKeysRaw = ""
-    @State private var pendingHomePlaybackTask: Task<Void, Never>?
     @State private var currentTimeMood = HomeTimeMood.current
     @StateObject private var shakeObserver = ShakeMotionObserver()
     private let timeMoodTimer = Timer.publish(every: 300, on: .main, in: .common).autoconnect()
@@ -55,7 +54,7 @@ struct ContentView: View {
     private let spacing: CGFloat = 8
     private var songs: [DemoSong] {
         let visibleSongs = musicConnector.homeSurfaceSongs.filter {
-            $0.isHomeSurfacePlayable && isHomeSongDisliked($0) == false
+            $0.isHomeSurfaceDisplayable && isHomeSongDisliked($0) == false
         }
         if visibleSongs.isEmpty == false {
             return visibleSongs
@@ -196,9 +195,6 @@ struct ContentView: View {
                             GreetingBadge(mood: currentTimeMood)
                         }
 
-                        if musicConnector.visibleSpotifySongCount > 0 {
-                            SpotifyHomeSignal(songCount: musicConnector.visibleSpotifySongCount)
-                        }
                     }
                     Spacer()
                     TopSettingsButton {
@@ -291,8 +287,6 @@ struct ContentView: View {
         }
         .onDisappear {
             musicConnector.stopPlaybackSync()
-            pendingHomePlaybackTask?.cancel()
-            pendingHomePlaybackTask = nil
             homeAutoFillTask?.cancel()
             homeAutoFillTask = nil
             resetHomeFlipState()
@@ -357,14 +351,9 @@ struct ContentView: View {
             return
         }
 
-        pendingHomePlaybackTask?.cancel()
         let queueSnapshot = compactHomePlaybackSnapshot(startingWith: song)
-        pendingHomePlaybackTask = Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(72))
-            guard !Task.isCancelled else { return }
-            nowPlaying = song
-            musicConnector.queuePlayback(for: song, in: queueSnapshot)
-        }
+        nowPlaying = song
+        musicConnector.queuePlayback(for: song, in: queueSnapshot)
     }
 
     private func compactHomePlaybackSnapshot(startingWith song: DemoSong) -> [DemoSong] {
@@ -565,7 +554,7 @@ struct ContentView: View {
         homeFlippingIndices = Set(homeSongs.indices)
         resetHomeFlipState()
         rememberRecentlyShownHomeSongs(homeSongs)
-        PlayerArtworkWarmupCache.shared.preload(songs: Array(homeSongs.prefix(120)))
+        PlayerArtworkWarmupCache.shared.preload(songs: Array(homeSongs.prefix(48)))
     }
 
     private func refreshVisibleHomeSongMetadata() {
@@ -585,7 +574,7 @@ struct ContentView: View {
         guard refreshedSongs.map(\.id) == homeSongs.map(\.id) else { return }
         homeSongs = refreshedSongs
         homePendingSongs = refreshedPendingSongs
-        PlayerArtworkWarmupCache.shared.preload(songs: Array((refreshedSongs + refreshedPendingSongs).prefix(120)))
+        PlayerArtworkWarmupCache.shared.preload(songs: Array((refreshedSongs + refreshedPendingSongs).prefix(48)))
     }
 
     private func mergedHomeSong(current: DemoSong, latest: DemoSong) -> DemoSong {
@@ -600,6 +589,7 @@ struct ContentView: View {
             storeID: latest.storeID ?? current.storeID,
             previewURL: latest.previewURL ?? current.previewURL,
             spotifyURI: latest.spotifyURI ?? current.spotifyURI,
+            artworkURL: latest.artworkURL ?? current.artworkURL,
             artworkImage: artworkImage,
             backdropImage: backdropImage,
             lyricsText: latest.lyricsText ?? current.lyricsText,
@@ -1573,41 +1563,77 @@ private struct GreetingBadge: View {
     }
 }
 
-private struct SpotifyHomeSignal: View {
+private struct SpotifyLibraryStatus: View {
     let songCount: Int
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 7) {
             ZStack {
                 Circle()
                     .fill(Color(red: 0.1, green: 0.86, blue: 0.36))
                     .frame(width: 24, height: 24)
-                    .shadow(color: Color(red: 0.1, green: 0.86, blue: 0.36).opacity(0.52), radius: 10, y: 3)
 
                 Image(systemName: "waveform")
-                    .font(.system(size: 11, weight: .black))
+                    .font(.system(size: 9, weight: .black))
                     .foregroundStyle(.black.opacity(0.82))
             }
 
             VStack(alignment: .leading, spacing: 1) {
                 Text("Spotify 已混入首页")
-                    .font(.system(size: 13, weight: .black, design: .rounded))
+                    .font(.system(size: 12, weight: .black, design: .rounded))
                     .foregroundStyle(.white)
                     .lineLimit(1)
 
                 Text("\(songCount) 首来自 Spotify")
-                    .font(.system(size: 10, weight: .bold, design: .rounded))
+                    .font(.system(size: 9, weight: .bold, design: .rounded))
                     .foregroundStyle(.white.opacity(0.68))
                     .lineLimit(1)
             }
+
+            Spacer()
         }
-        .padding(.leading, 7)
-        .padding(.trailing, 11)
-        .frame(height: 40)
-        .background(.black.opacity(0.34), in: Capsule())
+        .padding(.horizontal, 10)
+        .frame(maxWidth: .infinity)
+        .frame(height: 46)
+        .background(.black.opacity(0.48), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay {
-            Capsule()
-                .stroke(Color(red: 0.1, green: 0.86, blue: 0.36).opacity(0.72), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(Color(red: 0.1, green: 0.86, blue: 0.36).opacity(0.32), lineWidth: 1)
+        }
+    }
+}
+
+private struct SpotifyConnectedActionsRow: View {
+    let songCount: Int
+    let onDisconnect: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Button(role: .destructive, action: onDisconnect) {
+                HStack(spacing: 6) {
+                    Image(systemName: "rectangle.portrait.and.arrow.right")
+                        .font(.system(size: 12, weight: .bold))
+
+                    Text("登出 Spotify")
+                        .font(.system(size: 12, weight: .black))
+                        .lineLimit(1)
+                }
+                .foregroundStyle(Color(red: 1.0, green: 0.30, blue: 0.36))
+                .frame(maxWidth: .infinity)
+                .frame(height: 46)
+                .background(Color(red: 1.0, green: 0.12, blue: 0.20).opacity(0.12))
+                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .stroke(Color(red: 1.0, green: 0.22, blue: 0.30).opacity(0.26), lineWidth: 1)
+                }
+            }
+            .buttonStyle(.plain)
+            .frame(maxWidth: .infinity)
+
+            SpotifyLibraryStatus(songCount: songCount)
+                .frame(maxWidth: .infinity)
+                .layoutPriority(1)
         }
     }
 }
@@ -1721,6 +1747,7 @@ private struct ProfilePage: View {
                         tint: Color(red: 0.1, green: 0.84, blue: 0.36),
                         isLoading: connector.isConnectingSpotify,
                         isConnected: connector.isSpotifyReady,
+                        showsDisconnectButton: false,
                         onConnect: {
                             Task { await connector.connectSpotify() }
                         },
@@ -1728,6 +1755,12 @@ private struct ProfilePage: View {
                             connector.disconnectSpotify()
                         }
                     )
+
+                    if connector.isSpotifyReady {
+                        SpotifyConnectedActionsRow(songCount: connector.visibleSpotifySongCount) {
+                            connector.disconnectSpotify()
+                        }
+                    }
 
                     MusicConnectionControl(
                         connectTitle: "连接 Apple Music",
@@ -1754,6 +1787,19 @@ private struct ProfilePage: View {
                     )
 
                     SourceSettingsPanel(connector: connector)
+
+                    RecentSpotifyAlbumsPanel(connector: connector) { albumID in
+                        Task { await connector.playRecentSpotifyAlbum(albumID: albumID) }
+                    }
+
+                    ArtistPlaybackPanel(connector: connector) { artistID in
+                        UIImpactFeedbackGenerator(style: .medium).impactOccurred(intensity: 0.70)
+                        if connector.playArtistRadio(artistID: artistID) {
+                            withAnimation(.smooth(duration: 0.22, extraBounce: 0.0)) {
+                                activeTab = .home
+                            }
+                        }
+                    }
 
                     if let message = connector.message {
                         Text(message)
@@ -1815,6 +1861,7 @@ private struct SettingsModalView: View {
                         tint: Color(red: 0.1, green: 0.84, blue: 0.36),
                         isLoading: connector.isConnectingSpotify,
                         isConnected: connector.isSpotifyReady,
+                        showsDisconnectButton: false,
                         onConnect: {
                             Task { await connector.connectSpotify() }
                         },
@@ -1822,6 +1869,12 @@ private struct SettingsModalView: View {
                             connector.disconnectSpotify()
                         }
                     )
+
+                    if connector.isSpotifyReady {
+                        SpotifyConnectedActionsRow(songCount: connector.visibleSpotifySongCount) {
+                            connector.disconnectSpotify()
+                        }
+                    }
 
                     MusicConnectionControl(
                         connectTitle: "连接 Apple Music",
@@ -1846,6 +1899,17 @@ private struct SettingsModalView: View {
                     )
 
                     SourceSettingsPanel(connector: connector)
+
+                    RecentSpotifyAlbumsPanel(connector: connector) { albumID in
+                        Task { await connector.playRecentSpotifyAlbum(albumID: albumID) }
+                    }
+
+                    ArtistPlaybackPanel(connector: connector) { artistID in
+                        UIImpactFeedbackGenerator(style: .medium).impactOccurred(intensity: 0.70)
+                        if connector.playArtistRadio(artistID: artistID) {
+                            onClose()
+                        }
+                    }
 
                     if let message = connector.message {
                         Text(message)
@@ -1884,6 +1948,7 @@ private struct MusicConnectionControl: View {
     let tint: Color
     let isLoading: Bool
     let isConnected: Bool
+    var showsDisconnectButton = true
     let onConnect: () -> Void
     let onDisconnect: () -> Void
 
@@ -1898,7 +1963,7 @@ private struct MusicConnectionControl: View {
                 action: onConnect
             )
 
-            if isConnected {
+            if isConnected && showsDisconnectButton {
                 Button(role: .destructive, action: onDisconnect) {
                     HStack(spacing: 8) {
                         Image(systemName: "rectangle.portrait.and.arrow.right")
@@ -2121,6 +2186,307 @@ private struct SourceSettingsPanel: View {
     }
 }
 
+private struct RecentSpotifyAlbumsPanel: View {
+    @ObservedObject var connector: MusicConnectionManager
+    let onSelectAlbum: (String) -> Void
+
+    private var albums: [SpotifyRecentAlbumOption] {
+        connector.spotifyRecentAlbums
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                Image(systemName: "rectangle.stack.fill")
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundStyle(Color(red: 0.1, green: 0.86, blue: 0.36))
+                    .frame(width: 28, height: 28)
+                    .background(.white.opacity(0.08))
+                    .clipShape(Circle())
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("最近听的 Spotify 专辑")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(.white.opacity(0.68))
+
+                    Text(statusText)
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                }
+
+                Spacer()
+
+                if connector.isSpotifyRecentAlbumsRefreshing {
+                    ProgressView()
+                        .tint(.white.opacity(0.72))
+                } else {
+                    Button {
+                        Task { await connector.refreshSpotifyRecentAlbumsIfNeeded(force: true) }
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 13, weight: .black))
+                            .foregroundStyle(.white.opacity(0.58))
+                            .frame(width: 30, height: 30)
+                            .contentShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 14)
+            .frame(height: 52)
+            .background(.black.opacity(0.48))
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+
+            if albums.isEmpty == false {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 10) {
+                        ForEach(albums.prefix(12)) { album in
+                            RecentSpotifyAlbumCard(album: album) {
+                                onSelectAlbum(album.id)
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 2)
+                }
+                .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
+            }
+        }
+        .onAppear {
+            Task { await connector.refreshSpotifyRecentAlbumsIfNeeded() }
+        }
+    }
+
+    private var statusText: String {
+        if connector.isSpotifyRecentAlbumsRefreshing {
+            return albums.isEmpty ? "正在读取最近播放记录" : "正在更新 · \(albums.count) 张专辑"
+        }
+        return albums.isEmpty ? "连接 Spotify 后显示" : "\(albums.count) 张最近听过"
+    }
+}
+
+private struct RecentSpotifyAlbumCard: View {
+    let album: SpotifyRecentAlbumOption
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 8) {
+                RecentSpotifyAlbumCover(album: album)
+                    .frame(width: 104, height: 104)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(album.name)
+                        .font(.system(size: 13, weight: .black))
+                        .foregroundStyle(.white)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                        .frame(height: 32, alignment: .topLeading)
+
+                    Text(album.artist)
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(.white.opacity(0.56))
+                        .lineLimit(1)
+                }
+            }
+            .padding(8)
+            .frame(width: 120, height: 164, alignment: .topLeading)
+            .background(.black.opacity(0.48))
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay(alignment: .topTrailing) {
+                Image(systemName: "play.fill")
+                    .font(.system(size: 10, weight: .black))
+                    .foregroundStyle(.black.opacity(0.82))
+                    .frame(width: 24, height: 24)
+                    .background(.white.opacity(0.90), in: Circle())
+                    .padding(7)
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .stroke(.white.opacity(0.08), lineWidth: 1)
+            }
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct RecentSpotifyAlbumCover: View {
+    let album: SpotifyRecentAlbumOption
+
+    var body: some View {
+        ZStack {
+            LinearGradient(colors: album.colors, startPoint: .topLeading, endPoint: .bottomTrailing)
+
+            if let artworkURL = album.artworkURL, let url = URL(string: artworkURL) {
+                AsyncImage(url: url) { phase in
+                    switch phase {
+                    case let .success(image):
+                        image
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                    case .failure, .empty:
+                        Color.clear
+                    @unknown default:
+                        Color.clear
+                    }
+                }
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+}
+
+private struct ArtistPlaybackPanel: View {
+    @ObservedObject var connector: MusicConnectionManager
+    let onSelectArtist: (String) -> Void
+
+    private var options: [ArtistPlaybackOption] {
+        connector.artistPlaybackOptions
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Menu {
+                ForEach(options) { option in
+                    Button {
+                        onSelectArtist(option.id)
+                    } label: {
+                        Label("\(option.name) · \(option.count) 首", systemImage: "play.circle")
+                    }
+                }
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: "person.wave.2.fill")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(.white.opacity(0.86))
+                        .frame(width: 28, height: 28)
+                        .background(.white.opacity(0.08))
+                        .clipShape(Circle())
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("选择歌手播放")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundStyle(.white.opacity(0.68))
+
+                        Text(statusText)
+                            .font(.system(size: 15, weight: .bold))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                    }
+
+                    Spacer()
+
+                    if connector.isSpotifyLibraryRefreshing {
+                        ProgressView()
+                            .tint(.white.opacity(0.72))
+                    } else {
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(.white.opacity(0.42))
+                    }
+                }
+                .padding(.horizontal, 14)
+                .frame(height: 52)
+                .background(.black.opacity(0.48))
+                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .disabled(options.isEmpty)
+
+            if options.isEmpty == false {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(options.prefix(12)) { option in
+                            ArtistPlaybackChip(option: option) {
+                                onSelectArtist(option.id)
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 2)
+                }
+                .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
+            }
+        }
+        .onAppear {
+            PlayerArtworkWarmupCache.shared.preload(songs: options.map(\.previewSong))
+            Task {
+                await connector.refreshSpotifyArtistLibraryIfNeeded()
+                PlayerArtworkWarmupCache.shared.preload(songs: options.map(\.previewSong))
+            }
+        }
+        .onChange(of: options.map(\.id)) { _, _ in
+            PlayerArtworkWarmupCache.shared.preload(songs: options.map(\.previewSong))
+        }
+    }
+
+    private var statusText: String {
+        if connector.isSpotifyLibraryRefreshing {
+            return options.isEmpty ? "正在刷新 Spotify 曲库" : "正在更新 · \(options.count) 位歌手"
+        }
+        return options.isEmpty ? "暂无可播放歌手" : "\(options.count) 位歌手"
+    }
+}
+
+private struct ArtistPlaybackChip: View {
+    let option: ArtistPlaybackOption
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                ArtistPlaybackAvatar(song: option.previewSong)
+                    .frame(width: 30, height: 30)
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(option.name)
+                        .font(.system(size: 13, weight: .black))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.74)
+
+                    Text("\(option.count) 首")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(.white.opacity(0.54))
+                        .lineLimit(1)
+                }
+
+                Image(systemName: "play.fill")
+                    .font(.system(size: 10, weight: .black))
+                    .foregroundStyle(.black.opacity(0.82))
+                    .frame(width: 22, height: 22)
+                    .background(.white.opacity(0.88), in: Circle())
+            }
+            .padding(.leading, 6)
+            .padding(.trailing, 8)
+            .frame(width: 150, height: 44)
+            .background(.black.opacity(0.48))
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .stroke(.white.opacity(0.08), lineWidth: 1)
+            }
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct ArtistPlaybackAvatar: View {
+    let song: DemoSong
+
+    var body: some View {
+        ZStack {
+            LinearGradient(colors: song.colors, startPoint: .topLeading, endPoint: .bottomTrailing)
+
+            SongArtworkLayer(song: song)
+        }
+        .clipShape(Circle())
+        .overlay {
+            Circle()
+                .stroke(.white.opacity(0.12), lineWidth: 1)
+        }
+    }
+}
+
 private struct MusicPlaylistOption: Identifiable, Hashable {
     static let allID = "all"
 
@@ -2137,6 +2503,21 @@ private struct MusicPlaylistOption: Identifiable, Hashable {
     }
 }
 
+private struct ArtistPlaybackOption: Identifiable {
+    let id: String
+    let name: String
+    let count: Int
+    let previewSong: DemoSong
+}
+
+private struct SpotifyRecentAlbumOption: Identifiable {
+    let id: String
+    let name: String
+    let artist: String
+    let artworkURL: String?
+    let colors: [Color]
+}
+
 @MainActor
 private final class MusicConnectionManager: ObservableObject {
     @Published var isConnectingAppleMusic = false
@@ -2145,10 +2526,12 @@ private final class MusicConnectionManager: ObservableObject {
     @Published var applePlaylists: [MusicPlaylistOption] = []
     @Published var spotifySongs: [DemoSong] = []
     @Published var spotifyPlaylists: [MusicPlaylistOption] = []
+    @Published var spotifyRecentAlbums: [SpotifyRecentAlbumOption] = []
     @Published var homeFeedSongs: [DemoSong] = []
     @Published private(set) var isInitialLibraryLoading = true
     @Published private(set) var isHomeFeedRefreshing = false
     @Published private(set) var isSpotifyLibraryRefreshing = false
+    @Published private(set) var isSpotifyRecentAlbumsRefreshing = false
     @Published var recommendedSongs: [DemoSong] = []
     @Published var discoveryExtraSongs: [DemoSong] = []
     @Published var message: String?
@@ -2171,7 +2554,7 @@ private final class MusicConnectionManager: ObservableObject {
     @AppStorage("spotifyPrivacyResetVersion") private var spotifyPrivacyResetVersion = 0
 
     private let spotifyAuthenticator = SpotifyPKCEAuthenticator()
-    private let requiredSpotifyPrivacyResetVersion = 1
+    private let requiredSpotifyPrivacyResetVersion = 2
     private var playbackLoadingTask: Task<Void, Never>?
     private var queuedPlaybackTask: Task<Void, Never>?
     private var playbackPrefetchTask: Task<Void, Never>?
@@ -2179,6 +2562,9 @@ private final class MusicConnectionManager: ObservableObject {
     private var delayedHomeFeedRefreshTask: Task<Void, Never>?
     private var spotifyStartupRefreshTask: Task<Void, Never>?
     private var spotifyFullRefreshTask: Task<Void, Never>?
+    private var spotifyPlaybackRequestedSong: DemoSong?
+    private var lastSpotifyArtistLibraryRefreshAt: Date?
+    private var lastSpotifyRecentAlbumsRefreshAt: Date?
     private var initialLoadingFinishTask: Task<Void, Never>?
     private var initialLoadingTimeoutTask: Task<Void, Never>?
     private var initialLibraryLoadingStartedAt = Date()
@@ -2199,7 +2585,7 @@ private final class MusicConnectionManager: ObservableObject {
     private let playbackSessionSalt = Double.random(in: 0..<10_000)
     private let homeFeedSessionSalt = Double.random(in: 0..<10_000)
     private let playbackQueueLimit = 24
-    private let playbackQueueCommitCooldown: TimeInterval = 0.34
+    private let playbackQueueCommitCooldown: TimeInterval = 0.18
     private let playbackPrefetchLimit = 8
     private let homeFeedLimit = 220
     private let discoveryExtraSongLimit = 96
@@ -2207,7 +2593,39 @@ private final class MusicConnectionManager: ObservableObject {
     private var loadedPlaybackPrefetchPages = Set<Int>()
     private var lastRecommendationMood: HomeTimeMood?
 
+    init() {
+        let appRemote = SpotifyAppRemoteController.shared
+        appRemote.errorHandler = { [weak self] errorMessage in
+            guard let self else { return }
+            // Scene activation may probe App Remote in the background. Playback taps
+            // have their own Web API fallback, so this callback must not start a
+            // second request or replace the current playback status.
+            guard self.spotifyPlaybackRequestedSong == nil else { return }
+            self.message = errorMessage
+        }
+        appRemote.playbackStateHandler = { [weak self] spotifyURI, isPlaying in
+            guard let self else { return }
+            let matchingSong = self.spotifySongs.first { $0.spotifyURI == spotifyURI }
+                ?? self.currentSong.flatMap { $0.spotifyURI == spotifyURI ? $0 : nil }
+            guard let matchingSong else { return }
+            self.currentSong = matchingSong
+            self.playingSongID = matchingSong.id
+            self.isPlaying = isPlaying
+            if isPlaying {
+                self.spotifyPlaybackRequestedSong = nil
+            }
+            self.endPlaybackLoading()
+            self.message = isPlaying
+                ? "正在通过 Spotify 播放：\(matchingSong.title)"
+                : "已暂停：\(matchingSong.title)"
+        }
+    }
+
     var discoverySongs: [DemoSong] {
+        if hasUsableSpotifySession, isAppleMusicReady == false {
+            return uniqueDiscoverySongs(from: activeSpotifySongs)
+        }
+
         let baseSongs = librarySongs
         let recommendationSongs = aiRecommendationsEnabled ? recommendedSongs : []
         let spotifySongs = activeSpotifySongs
@@ -2220,6 +2638,10 @@ private final class MusicConnectionManager: ObservableObject {
         let recommendationSongs = aiRecommendationsEnabled ? recommendedSongs : []
         let rotatedSpotifySongs = rotatedHomeSongs(activeSpotifySongs, salt: homeFeedSessionSalt)
         let rotatedLibrarySongs = rotatedHomeSongs(librarySongs, salt: homeFeedSessionSalt * 0.73 + 19)
+        if hasUsableSpotifySession, isAppleMusicReady == false {
+            return rotatedSpotifySongs
+        }
+
         let spotifyFrontDoor = Array(rotatedSpotifySongs.prefix(28))
         let connectedSongs = uniqueDiscoverySongs(
             from: spotifyFrontDoor
@@ -2242,11 +2664,200 @@ private final class MusicConnectionManager: ObservableObject {
     }
 
     private var activeSpotifySongs: [DemoSong] {
-        hasUsableSpotifySession ? spotifySongs.filter(\.isHomeSurfacePlayable) : []
+        hasUsableSpotifySession ? spotifySongs.filter(\.hasValidSpotifyIdentity) : []
     }
 
     var visibleSpotifySongCount: Int {
         activeSpotifySongs.count
+    }
+
+    var artistPlaybackOptions: [ArtistPlaybackOption] {
+        let groupedSongs = Dictionary(grouping: artistPlaybackSongPool()) { song in
+            normalizedArtistForRecommendation(song.artist)
+        }
+
+        return groupedSongs.compactMap { artistID, songs -> ArtistPlaybackOption? in
+            guard artistID.isEmpty == false, let previewSong = songs.first else { return nil }
+            return ArtistPlaybackOption(
+                id: artistID,
+                name: displayArtistName(from: songs),
+                count: songs.count,
+                previewSong: previewSong
+            )
+        }
+        .sorted { lhs, rhs in
+            if lhs.count == rhs.count {
+                return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+            }
+            return lhs.count > rhs.count
+        }
+    }
+
+    @discardableResult
+    func playArtistRadio(artistID: String) -> Bool {
+        let queueSongs = artistPlaybackSongs(forArtistID: artistID)
+        guard let firstSong = queueSongs.first else {
+            message = "这个歌手暂无可播放歌曲。"
+            return false
+        }
+
+        queuePlayback(for: firstSong, in: queueSongs, randomizeQueue: false)
+        message = "正在播放 \(firstSong.artist)"
+        return true
+    }
+
+    func refreshSpotifyArtistLibraryIfNeeded(force: Bool = false) async {
+        guard hasUsableSpotifySession else { return }
+        guard isSpotifyLibraryRefreshing == false else { return }
+        let shouldRefresh = force ||
+            spotifySongs.count < 240 ||
+            artistPlaybackOptions.count < 16 ||
+            lastSpotifyArtistLibraryRefreshAt.map { Date().timeIntervalSince($0) > 120 } ?? true
+        guard shouldRefresh else { return }
+
+        isSpotifyLibraryRefreshing = true
+        defer {
+            isSpotifyLibraryRefreshing = false
+            lastSpotifyArtistLibraryRefreshAt = Date()
+        }
+
+        await refreshSpotifySongsIfPossible(
+            showMessage: false,
+            maxCount: 1_200,
+            playlistLimit: 80,
+            playlistTrackLimit: 80,
+            followedArtistLimit: 60,
+            artistTopTrackLimit: 5,
+            hydrateLimit: 260,
+            awaitHydration: true
+        )
+    }
+
+    func refreshSpotifyRecentAlbumsIfNeeded(force: Bool = false) async {
+        guard hasUsableSpotifySession else {
+            spotifyRecentAlbums = []
+            return
+        }
+        guard isSpotifyRecentAlbumsRefreshing == false else { return }
+        let shouldRefresh = force ||
+            spotifyRecentAlbums.isEmpty ||
+            lastSpotifyRecentAlbumsRefreshAt.map { Date().timeIntervalSince($0) > 90 } ?? true
+        guard shouldRefresh else { return }
+
+        isSpotifyRecentAlbumsRefreshing = true
+        defer {
+            isSpotifyRecentAlbumsRefreshing = false
+            lastSpotifyRecentAlbumsRefreshAt = Date()
+        }
+
+        do {
+            let token = try await currentSpotifyAccessToken()
+            let albums = try await SpotifyWebAPIClient.recentlyPlayedAlbums(accessToken: token, limit: 50)
+            guard spotifyAccessToken == token else { return }
+            spotifyRecentAlbums = spotifyRecentAlbumOptions(from: albums)
+            if spotifyRecentAlbums.isEmpty {
+                message = "Spotify 最近播放里暂时没有读到专辑。"
+            }
+        } catch {
+            message = "Spotify 最近播放读取失败，请重新连接 Spotify。"
+        }
+    }
+
+    func playRecentSpotifyAlbum(albumID: String) async {
+        guard hasUsableSpotifySession else {
+            message = "请先连接 Spotify。"
+            return
+        }
+
+        beginPlaybackLoading()
+        isSpotifyRecentAlbumsRefreshing = true
+        defer { isSpotifyRecentAlbumsRefreshing = false }
+
+        do {
+            let token = try await currentSpotifyAccessToken()
+            let drafts = try await SpotifyWebAPIClient.albumSongDrafts(accessToken: token, albumID: albumID, limit: 80)
+            guard spotifyAccessToken == token else { return }
+            guard drafts.isEmpty == false else {
+                endPlaybackLoading()
+                message = "这张专辑暂时没有读到可播放歌曲。"
+                return
+            }
+
+            let songs = spotifySongs(from: drafts, artworkByID: [:], appleTrackByID: [:])
+            guard let firstSong = songs.first else {
+                endPlaybackLoading()
+                message = "这张专辑暂时没有可播放歌曲。"
+                return
+            }
+
+            spotifySongs = uniqueDiscoverySongs(from: songs + spotifySongs)
+            queuePlayback(for: firstSong, in: songs, randomizeQueue: false)
+            Task { @MainActor in
+                await hydrateSpotifyMetadata(for: drafts, hydrateLimit: min(48, drafts.count), tokenSnapshot: token)
+            }
+            message = "正在播放专辑：\(recentSpotifyAlbumName(for: albumID) ?? firstSong.artist)"
+        } catch {
+            endPlaybackLoading()
+            message = "Spotify 专辑读取失败：\(error.localizedDescription)"
+        }
+    }
+
+    private func spotifyRecentAlbumOptions(from albums: [SpotifyRecentAlbumDraft]) -> [SpotifyRecentAlbumOption] {
+        let palettes = DemoSong.library.map(\.colors)
+        return albums.enumerated().map { index, album in
+            SpotifyRecentAlbumOption(
+                id: album.id,
+                name: album.name,
+                artist: album.artist,
+                artworkURL: album.artworkURL,
+                colors: palettes[(index + album.name.count) % palettes.count]
+            )
+        }
+    }
+
+    private func recentSpotifyAlbumName(for albumID: String) -> String? {
+        spotifyRecentAlbums.first(where: { $0.id == albumID })?.name
+    }
+
+    private func artistPlaybackSongs(forArtistID artistID: String) -> [DemoSong] {
+        let songs = artistPlaybackSongPool().filter { song in
+            normalizedArtistForRecommendation(song.artist) == artistID
+        }
+        return timeRecommendedRankedSongs(from: songs)
+    }
+
+    private func artistPlaybackSongPool() -> [DemoSong] {
+        uniqueDiscoverySongs(
+            from: homeSurfaceSongs
+                + discoverySongs
+                + librarySongs
+                + activeSpotifySongs
+                + recommendedSongs
+                + discoveryExtraSongs
+        )
+        .filter { song in
+            song.isPlayable &&
+            song.isPlaceholder == false &&
+            isSelectableArtist(song.artist)
+        }
+    }
+
+    private func isSelectableArtist(_ artist: String) -> Bool {
+        let normalizedArtist = normalizedArtistForRecommendation(artist)
+        return normalizedArtist.isEmpty == false &&
+            normalizedArtist != "unknown artist" &&
+            normalizedArtist != "spotify"
+    }
+
+    private func displayArtistName(from songs: [DemoSong]) -> String {
+        Dictionary(grouping: songs, by: \.artist)
+            .sorted { lhs, rhs in
+                if lhs.value.count == rhs.value.count {
+                    return lhs.key.localizedCaseInsensitiveCompare(rhs.key) == .orderedAscending
+                }
+                return lhs.value.count > rhs.value.count
+            }
+            .first?.key ?? songs.first?.artist ?? "Artist"
     }
 
     private func rotatedHomeSongs(_ songs: [DemoSong], salt: Double) -> [DemoSong] {
@@ -2311,18 +2922,24 @@ private final class MusicConnectionManager: ObservableObject {
     }
 
     private func clearSpotifyPrivateData() {
+        SpotifyAppRemoteController.shared.clearAuthorization()
         spotifyAccessToken = ""
         spotifyRefreshToken = ""
         spotifyTokenExpiresAt = 0
         selectedSpotifyPlaylistID = MusicPlaylistOption.allID
         spotifySongs = []
         spotifyPlaylists = []
+        spotifyRecentAlbums = []
     }
 
     private func runSpotifyPrivacyMigrationIfNeeded() {
         guard spotifyPrivacyResetVersion < requiredSpotifyPrivacyResetVersion else { return }
+        let hadSpotifySession = spotifyAccessToken.isEmpty == false
         clearSpotifyPrivateData()
         spotifyPrivacyResetVersion = requiredSpotifyPrivacyResetVersion
+        if hadSpotifySession {
+            message = "Spotify 接口权限已升级，请重新连接一次。"
+        }
     }
 
     func connectAppleMusic() async {
@@ -2474,6 +3091,11 @@ private final class MusicConnectionManager: ObservableObject {
     }
 
     func loadMoreDiscoverySongs(page: Int) async -> [DemoSong] {
+        guard hasUsableSpotifySession == false || isAppleMusicReady else {
+            await refreshSpotifyArtistLibraryIfNeeded(force: true)
+            return []
+        }
+
         let queries = moreDiscoveryQueries(page: page)
         let existingSongs = homeFeedSongs + librarySongs + recommendedSongs + discoveryExtraSongs
         let additions = await fetchAppleCatalogSongs(
@@ -2493,7 +3115,10 @@ private final class MusicConnectionManager: ObservableObject {
         maxCount: Int = 500,
         playlistLimit: Int = 50,
         playlistTrackLimit: Int = 40,
-        hydrateLimit: Int = 96
+        followedArtistLimit: Int = 0,
+        artistTopTrackLimit: Int = 0,
+        hydrateLimit: Int = 96,
+        awaitHydration: Bool = false
     ) async {
         guard spotifyAccessToken.isEmpty == false else {
             spotifySongs = []
@@ -2512,20 +3137,29 @@ private final class MusicConnectionManager: ObservableObject {
             }
 
             let tokenForRequest = spotifyAccessToken
-            let playlists = playlistLimit > 0
-                ? try await SpotifyWebAPIClient.playlistOptions(accessToken: tokenForRequest, limit: playlistLimit)
+            async let playlistsRequest: [MusicPlaylistOption] = playlistLimit > 0
+                ? SpotifyWebAPIClient.playlistOptions(accessToken: tokenForRequest, limit: playlistLimit)
                 : spotifyPlaylists
-            let drafts = try await SpotifyWebAPIClient.discoverySongDrafts(
+            async let draftsRequest = SpotifyWebAPIClient.discoverySongDrafts(
                 accessToken: tokenForRequest,
                 maxCount: maxCount,
                 playlistID: selectedSpotifyPlaylistID,
                 playlistLimit: playlistLimit,
-                playlistTrackLimit: playlistTrackLimit
+                playlistTrackLimit: playlistTrackLimit,
+                followedArtistLimit: followedArtistLimit,
+                artistTopTrackLimit: artistTopTrackLimit
             )
+            let (playlists, drafts) = try await (playlistsRequest, draftsRequest)
             guard spotifyAccessToken == tokenForRequest else { return }
             spotifyPlaylists = playlists
             spotifySongs = spotifySongs(from: drafts, artworkByID: [:], appleTrackByID: [:])
-            hydrateSpotifyMetadata(for: drafts, hydrateLimit: hydrateLimit, tokenSnapshot: tokenForRequest)
+            if awaitHydration {
+                await hydrateSpotifyMetadata(for: drafts, hydrateLimit: hydrateLimit, tokenSnapshot: tokenForRequest)
+            } else {
+                Task { @MainActor in
+                    await hydrateSpotifyMetadata(for: drafts, hydrateLimit: hydrateLimit, tokenSnapshot: tokenForRequest)
+                }
+            }
             refreshHomeFeed()
             if aiRecommendationsEnabled {
                 refreshRecommendations()
@@ -2533,14 +3167,17 @@ private final class MusicConnectionManager: ObservableObject {
             if showMessage {
                 message = drafts.isEmpty ? "Spotify 已连接，但没有读到已收藏歌曲或歌单歌曲。" : "已导入 \(drafts.count) 首 Spotify 歌曲到首页"
             }
-        } catch {
+        } catch SpotifyAPIError.unauthorized {
             clearSpotifyPrivateData()
             refreshHomeFeed()
-            if aiRecommendationsEnabled {
-                refreshRecommendations()
-            }
             if showMessage {
-                message = "Spotify 已连接，但暂时没拉到歌单：\(error.localizedDescription)"
+                message = "Spotify 授权已过期，请重新连接。"
+            }
+        } catch {
+            if showMessage {
+                message = spotifySongs.isEmpty
+                    ? "Spotify 暂时无法加载，请稍后重试。"
+                    : "Spotify 更新失败，已保留上次加载的曲库。"
             }
         }
     }
@@ -2571,7 +3208,12 @@ private final class MusicConnectionManager: ObservableObject {
             guard spotifyAccessToken == tokenSnapshot else { return }
             isSpotifyLibraryRefreshing = true
             defer { isSpotifyLibraryRefreshing = false }
-            await refreshSpotifySongsIfPossible(maxCount: 500, playlistLimit: 50, playlistTrackLimit: 40, hydrateLimit: 72)
+            await refreshSpotifySongsIfPossible(
+                maxCount: 1_000,
+                playlistLimit: 30,
+                playlistTrackLimit: 50,
+                hydrateLimit: 80
+            )
         }
     }
 
@@ -2584,53 +3226,8 @@ private final class MusicConnectionManager: ObservableObject {
         }
     }
 
-    func openSpotifySong(for song: DemoSong) {
-        guard song.source == .spotify, let spotifyURI = song.spotifyURI else {
-            message = "这首 Spotify 歌缺少打开链接。"
-            return
-        }
-
-        stopPreviewPlayback(clearPlaybackState: true)
-        MPMusicPlayerController.applicationMusicPlayer.stop()
-        currentSong = nil
-        playingSongID = nil
-        isPlaying = false
-        isPlaybackTransitioning = false
-        showPlaybackLoadingToast = false
-
-        let webURL = spotifyWebURL(from: spotifyURI)
-        guard let appURL = URL(string: spotifyURI) else {
-            openExternalURL(webURL, fallback: nil)
-            return
-        }
-
-        UIApplication.shared.open(appURL, options: [:]) { [weak self] didOpen in
-            guard didOpen == false else { return }
-            Task { @MainActor in
-                self?.openExternalURL(webURL, fallback: nil)
-            }
-        }
-        message = "正在打开 Spotify：\(song.title)"
-    }
-
-    private func spotifyWebURL(from spotifyURI: String) -> URL? {
-        guard spotifyURI.hasPrefix("spotify:track:") else { return nil }
-        let trackID = String(spotifyURI.dropFirst("spotify:track:".count))
-        return URL(string: "https://open.spotify.com/track/\(trackID)")
-    }
-
-    private func openExternalURL(_ url: URL?, fallback: URL?) {
-        guard let url else {
-            if let fallback {
-                UIApplication.shared.open(fallback)
-            }
-            return
-        }
-        UIApplication.shared.open(url)
-    }
-
     func startSpotifyPlayback(for song: DemoSong) async {
-        guard song.source == .spotify, song.spotifyURI != nil else {
+        guard song.source == .spotify, let spotifyURI = song.spotifyURI else {
             message = "这首 Spotify 歌缺少播放链接。"
             return
         }
@@ -2638,14 +3235,79 @@ private final class MusicConnectionManager: ObservableObject {
             message = "请先连接 Spotify。"
             return
         }
+        spotifyPlaybackRequestedSong = song
 
-        currentSong = song
-        playingSongID = song.id
-        isPlaying = false
-        endPlaybackLoading()
-        playingSongID = nil
-        currentSong = nil
-        message = "Spotify 播放暂时不可用，我先保住 Apple Music 播放不闪退。"
+        do {
+            try await SpotifyAppRemoteController.shared.playIfConnected(uri: spotifyURI)
+            currentSong = song
+            playingSongID = song.id
+            endPlaybackLoading()
+            isPlaying = true
+            spotifyPlaybackRequestedSong = nil
+            message = "正在通过 Spotify 播放：\(song.title)"
+            return
+        } catch {
+            // Never launch Spotify from a song tap. Web API playback is the
+            // non-interrupting fallback when the local App Remote is unavailable.
+        }
+        await startSpotifyConnectPlayback(for: song)
+    }
+
+    private func startSpotifyConnectPlayback(for song: DemoSong) async {
+        guard let spotifyURI = song.spotifyURI else { return }
+        do {
+            let token = try await currentSpotifyAccessToken()
+            do {
+                try await SpotifyWebAPIClient.startPlayback(accessToken: token, trackURI: spotifyURI, device: nil)
+            } catch SpotifyPlaybackError.noActiveDevice {
+                let device = try await SpotifyWebAPIClient.preferredPlaybackDevice(accessToken: token)
+                try await SpotifyWebAPIClient.startPlayback(accessToken: token, trackURI: spotifyURI, device: device)
+            }
+            currentSong = song
+            playingSongID = song.id
+            isPlaying = true
+            spotifyPlaybackRequestedSong = nil
+            endPlaybackLoading()
+            message = "正在通过 Spotify 播放：\(song.title)"
+        } catch SpotifyPlaybackError.noActiveDevice {
+            endPlaybackLoading()
+            isPlaying = false
+            playingSongID = nil
+            spotifyPlaybackRequestedSong = nil
+            message = "Spotify 当前没有在线播放设备，请先让 Spotify 保持登录并在后台运行。"
+        } catch {
+            endPlaybackLoading()
+            isPlaying = false
+            playingSongID = nil
+            spotifyPlaybackRequestedSong = nil
+            message = error.localizedDescription
+        }
+    }
+
+    private func pauseSpotifyPlayback(for song: DemoSong) async {
+        do {
+            if SpotifyAppRemoteController.shared.isAuthorized {
+                do {
+                    try await SpotifyAppRemoteController.shared.pause()
+                    currentSong = song
+                    playingSongID = song.id
+                    isPlaying = false
+                    message = "已暂停：\(song.title)"
+                    return
+                } catch {
+                    // App Remote may be reconnecting; Web API pause remains the fallback.
+                }
+            }
+
+            let token = try await currentSpotifyAccessToken()
+            try await SpotifyWebAPIClient.pausePlayback(accessToken: token)
+            currentSong = song
+            playingSongID = song.id
+            isPlaying = false
+            message = "已暂停：\(song.title)"
+        } catch {
+            message = error.localizedDescription
+        }
     }
 
     private func currentSpotifyAccessToken() async throws -> String {
@@ -2668,7 +3330,6 @@ private final class MusicConnectionManager: ObservableObject {
         let palettes = DemoSong.library.map(\.colors)
         return drafts.enumerated().map { index, draft in
             let palette = palettes[(index + draft.title.count) % palettes.count]
-            let matchedTrack = appleTrackByID[draft.id]
             let artworkImage = artworkByID[draft.id]
             let magicColor = artworkImage?.magicAverageColor ?? UIColor(songPalette: palette)
             return DemoSong(
@@ -2677,8 +3338,9 @@ private final class MusicConnectionManager: ObservableObject {
                 artist: draft.artist,
                 colors: palette,
                 storeID: nil,
-                previewURL: draft.previewURL ?? matchedTrack?.previewURL,
+                previewURL: draft.previewURL,
                 spotifyURI: draft.spotifyURI,
+                artworkURL: draft.artworkURL,
                 artworkImage: artworkImage,
                 backdropImage: artworkImage?.playerBackdropImage,
                 magicColor: Color(uiColor: magicColor),
@@ -2692,40 +3354,38 @@ private final class MusicConnectionManager: ObservableObject {
         initialAppleTrackByID: [String: ITunesTrack] = [:],
         hydrateLimit: Int = 96,
         tokenSnapshot: String
-    ) {
-        Task { @MainActor in
+    ) async {
+        guard spotifyAccessToken == tokenSnapshot else { return }
+        _ = initialAppleTrackByID
+        let artworkDrafts = Array(drafts.prefix(hydrateLimit))
+        var artworkByID: [String: UIImage] = [:]
+        let batchSize = 12
+
+        for batchStart in stride(from: 0, to: artworkDrafts.count, by: batchSize) {
             guard spotifyAccessToken == tokenSnapshot else { return }
-            let playbackDrafts = Array(drafts.prefix(hydrateLimit))
-            let artworkDraftIDs = Set(drafts.prefix(min(24, hydrateLimit)).map(\.id))
-            var artworkByID: [String: UIImage] = [:]
-            var appleTrackByID = initialAppleTrackByID
-            for (index, draft) in playbackDrafts.enumerated() {
-                guard spotifyAccessToken == tokenSnapshot else { return }
-                async let spotifyArtwork = artworkDraftIDs.contains(draft.id)
-                    ? ITunesSearchClient.artworkImage(from: draft.artworkURL)
-                    : nil
-                let appleMatch: ITunesTrack?
-                if let existingMatch = appleTrackByID[draft.id] {
-                    appleMatch = existingMatch
-                } else {
-                    appleMatch = await bestAppleCatalogMatch(for: draft)
+            let batch = Array(artworkDrafts[batchStart..<min(batchStart + batchSize, artworkDrafts.count)])
+            let loadedArtwork = await withTaskGroup(of: (String, UIImage?).self) { group in
+                for draft in batch {
+                    group.addTask {
+                        (draft.id, await ITunesSearchClient.artworkImage(from: draft.artworkURL))
+                    }
                 }
-                if let track = appleMatch {
-                    appleTrackByID[draft.id] = track
+
+                var results: [(String, UIImage?)] = []
+                for await result in group {
+                    results.append(result)
                 }
-                var resolvedArtwork = await spotifyArtwork
-                if resolvedArtwork == nil {
-                    resolvedArtwork = await ITunesSearchClient.artworkImage(from: appleTrackByID[draft.id]?.artworkURL100)
-                }
-                if let image = resolvedArtwork {
-                    artworkByID[draft.id] = image
-                }
-                if index < 16 || index.isMultiple(of: 8) || draft.id == playbackDrafts.last?.id {
-                    guard spotifyAccessToken == tokenSnapshot else { return }
-                    spotifySongs = spotifySongs(from: drafts, artworkByID: artworkByID, appleTrackByID: appleTrackByID)
-                    refreshHomeFeed()
+                return results
+            }
+
+            for (id, image) in loadedArtwork {
+                if let image {
+                    artworkByID[id] = image
                 }
             }
+            guard spotifyAccessToken == tokenSnapshot else { return }
+            spotifySongs = spotifySongs(from: drafts, artworkByID: artworkByID, appleTrackByID: [:])
+            refreshHomeFeed()
         }
     }
 
@@ -2782,6 +3442,7 @@ private final class MusicConnectionManager: ObservableObject {
             storeID: nil,
             previewURL: song.previewURL ?? previewURL,
             spotifyURI: song.spotifyURI,
+            artworkURL: song.artworkURL,
             artworkImage: artworkImage,
             backdropImage: artworkImage?.playerBackdropImage ?? song.backdropImage,
             lyricsText: song.lyricsText,
@@ -3014,28 +3675,19 @@ private final class MusicConnectionManager: ObservableObject {
         playingSongID = song.id
         currentSong = song
         isPlaying = true
-        message = "正在准备 Spotify 歌曲..."
+        let spotifyQueue = uniqueDiscoverySongs(from: [song] + (queueSongs ?? []))
+            .filter(\.hasValidSpotifyIdentity)
+        let spotifyTail = spotifyQueue.filter { isSameSong($0, song) == false }
+        activePlaybackQueue = Array(
+            ([song] + (randomizeQueue ? timeRecommendedPlaybackTail(from: spotifyTail) : spotifyTail))
+                .prefix(playbackQueueLimit)
+        )
+        message = "正在连接 Spotify 播放..."
 
         queuedPlaybackTask = Task { @MainActor in
-            guard let resolvedSong = await resolvedSpotifySong(song),
-                  !Task.isCancelled,
-                  requestID == playbackRequestID else {
-                if requestID == playbackRequestID {
-                    endPlaybackLoading(requestID: requestID)
-                    isPlaying = false
-                    playingSongID = nil
-                    if song.spotifyURI != nil {
-                        openSpotifySong(for: song)
-                    } else {
-                        message = "这首 Spotify 歌暂时没有可播放预览。"
-                    }
-                }
-                return
-            }
-
-            let resolvedQueue = replacingSong(song, with: resolvedSong, in: queueSongs)
+            guard !Task.isCancelled, requestID == playbackRequestID else { return }
             queuedPlaybackTask = nil
-            queuePlayback(for: resolvedSong, in: resolvedQueue, randomizeQueue: randomizeQueue)
+            await startSpotifyPlayback(for: song)
         }
     }
 
@@ -3052,13 +3704,22 @@ private final class MusicConnectionManager: ObservableObject {
 
     private func playbackQueueCommitDelay() -> Int {
         let now = Date().timeIntervalSinceReferenceDate
-        guard lastPlayerQueueCommitTime > 0 else { return 90 }
+        guard lastPlayerQueueCommitTime > 0 else { return 0 }
         let elapsed = now - lastPlayerQueueCommitTime
-        let wait = max(0.09, playbackQueueCommitCooldown - elapsed)
+        let wait = max(0, playbackQueueCommitCooldown - elapsed)
         return Int((wait * 1000).rounded())
     }
 
     func togglePlayback(for song: DemoSong, in queueSongs: [DemoSong]? = nil) async {
+        if song.source == .spotify {
+            if currentSong.map({ isSameSong($0, song) }) == true, isPlaying {
+                await pauseSpotifyPlayback(for: song)
+            } else {
+                queueSpotifyPlaybackAfterResolving(song, in: queueSongs, randomizeQueue: false)
+            }
+            return
+        }
+
         guard song.isPlayable else {
             message = "这首是 AI 推荐，暂时没有可播放资源。"
             return
@@ -3302,6 +3963,8 @@ private final class MusicConnectionManager: ObservableObject {
             mediaItem: song.mediaItem ?? item,
             storeID: song.storeID ?? item.safePlaybackStoreID,
             previewURL: song.previewURL,
+            spotifyURI: song.spotifyURI,
+            artworkURL: song.artworkURL,
             artworkImage: artworkImage,
             backdropImage: artworkImage?.playerBackdropImage ?? song.backdropImage,
             lyricsText: Self.extractLyrics(from: item) ?? song.lyricsText,
@@ -3680,6 +4343,12 @@ private final class MusicConnectionManager: ObservableObject {
                 guard seenStoreIDs.insert(storeID).inserted else { return nil }
                 return song
             }
+            if song.previewURL != nil {
+                return song
+            }
+            if song.hasValidSpotifyIdentity {
+                return song
+            }
             guard let mediaItem = song.mediaItem else { return nil }
             guard seenIDs.insert(mediaItem.persistentID).inserted else { return nil }
             return song
@@ -3739,7 +4408,7 @@ private final class MusicConnectionManager: ObservableObject {
         if homeFeedSongs.isEmpty, provisionalFeed.isEmpty == false {
             homeFeedSongs = provisionalFeed
         }
-        if isInitialLibraryLoading, provisionalFeed.contains(where: \.isHomeSurfacePlayable) {
+        if isInitialLibraryLoading, provisionalFeed.contains(where: \.isHomeSurfaceDisplayable) {
             finishInitialLibraryLoading()
         }
 
@@ -3785,10 +4454,14 @@ private final class MusicConnectionManager: ObservableObject {
         let storefronts = homeFeedStorefronts(sessionSalt: sessionSalt)
         let profile = musicTasteProfile(from: seedSongs)
         let spotifyLayer = homeFeedShuffledSongs(
-            spotifySongs,
+            activeSpotifySongs,
             profile: profile,
             sessionSalt: sessionSalt
         )
+        if hasUsableSpotifySession, isAppleMusicReady == false {
+            finishInitialLibraryLoading()
+            return Array(spotifyLayer.prefix(homeFeedLimit))
+        }
         let chartLayers = await fetchHomeChartLayers(
             storefronts: storefronts,
             seedSongs: seedSongs,
@@ -4719,8 +5392,30 @@ enum SpotifyAuthConfig {
     static let appRemoteRedirectURI = "musicfind://spotify-login-callback"
     static let scopes = [
         "user-library-read",
-        "playlist-read-private"
+        "playlist-read-private",
+        "user-follow-read",
+        "user-read-recently-played",
+        "user-top-read",
+        "user-read-playback-state",
+        "user-modify-playback-state"
     ]
+}
+
+private enum SpotifyAPIError: LocalizedError {
+    case unauthorized
+    case rateLimited
+    case requestFailed(Int)
+
+    var errorDescription: String? {
+        switch self {
+        case .unauthorized:
+            return "Spotify 授权已过期。"
+        case .rateLimited:
+            return "Spotify 请求过于频繁，请稍后重试。"
+        case let .requestFailed(statusCode):
+            return "Spotify 请求失败：\(statusCode)"
+        }
+    }
 }
 
 private enum SpotifyPlaybackError: LocalizedError {
@@ -4745,15 +5440,9 @@ private enum SpotifyPlaybackError: LocalizedError {
 
 private enum SpotifyWebAPIClient {
     static func playlistOptions(accessToken: String, limit: Int) async throws -> [MusicPlaylistOption] {
-        var components = URLComponents(string: "https://api.spotify.com/v1/me/playlists")
-        components?.queryItems = [
-            URLQueryItem(name: "limit", value: "\(limit)")
-        ]
-        guard let url = components?.url else { return [] }
-
-        let response = try await get(SpotifyPlaylistsResponse.self, url: url, accessToken: accessToken)
-        return response.items.map { playlist in
-            MusicPlaylistOption(id: playlist.id, title: playlist.name, count: playlist.tracks?.total ?? 0)
+        let playlists = try await currentUserPlaylists(accessToken: accessToken, limit: limit)
+        return playlists.map { playlist in
+            MusicPlaylistOption(id: playlist.id, title: playlist.name, count: playlist.itemCount)
         }
     }
 
@@ -4762,7 +5451,9 @@ private enum SpotifyWebAPIClient {
         maxCount: Int,
         playlistID: String,
         playlistLimit: Int = 50,
-        playlistTrackLimit: Int = 40
+        playlistTrackLimit: Int = 40,
+        followedArtistLimit: Int = 0,
+        artistTopTrackLimit: Int = 0
     ) async throws -> [SpotifySongDraft] {
         if playlistID != MusicPlaylistOption.allID {
             return songDrafts(
@@ -4771,10 +5462,71 @@ private enum SpotifyWebAPIClient {
             )
         }
 
-        async let savedTracks = (try? savedTracks(accessToken: accessToken, limit: min(maxCount, 500))) ?? []
+        async let savedTracks = (try? savedTracks(accessToken: accessToken, limit: min(maxCount, 1_000))) ?? []
         async let playlistTracks = (try? tracksFromCurrentUserPlaylists(accessToken: accessToken, playlistLimit: playlistLimit, trackLimit: playlistTrackLimit)) ?? []
-        let tracks = await savedTracks + playlistTracks
+        async let recentTracks = (try? recentlyPlayedTracks(accessToken: accessToken, limit: 50)) ?? []
+        async let shortTermTopTracks = (try? topTracks(accessToken: accessToken, timeRange: "short_term", limit: 50)) ?? []
+        async let mediumTermTopTracks = (try? topTracks(accessToken: accessToken, timeRange: "medium_term", limit: 50)) ?? []
+        let tracks = await recentTracks + savedTracks + playlistTracks + shortTermTopTracks + mediumTermTopTracks
         return songDrafts(from: tracks, maxCount: maxCount)
+    }
+
+    private static func recentlyPlayedTracks(accessToken: String, limit: Int) async throws -> [SpotifyTrack] {
+        var components = URLComponents(string: "https://api.spotify.com/v1/me/player/recently-played")
+        components?.queryItems = [
+            URLQueryItem(name: "limit", value: "\(min(max(limit, 1), 50))")
+        ]
+        guard let url = components?.url else { return [] }
+        let response = try await get(SpotifyRecentlyPlayedTracksResponse.self, url: url, accessToken: accessToken)
+        return response.items.compactMap(\.track)
+    }
+
+    private static func topTracks(accessToken: String, timeRange: String, limit: Int) async throws -> [SpotifyTrack] {
+        var components = URLComponents(string: "https://api.spotify.com/v1/me/top/tracks")
+        components?.queryItems = [
+            URLQueryItem(name: "time_range", value: timeRange),
+            URLQueryItem(name: "limit", value: "\(min(max(limit, 1), 50))")
+        ]
+        guard let url = components?.url else { return [] }
+        return try await get(SpotifyTracksPageResponse.self, url: url, accessToken: accessToken).items
+    }
+
+    static func recentlyPlayedAlbums(accessToken: String, limit: Int) async throws -> [SpotifyRecentAlbumDraft] {
+        var components = URLComponents(string: "https://api.spotify.com/v1/me/player/recently-played")
+        components?.queryItems = [
+            URLQueryItem(name: "limit", value: "\(min(max(limit, 1), 50))")
+        ]
+        guard let url = components?.url else { return [] }
+
+        let response = try await get(SpotifyRecentlyPlayedTracksResponse.self, url: url, accessToken: accessToken)
+        var seenAlbumIDs = Set<String>()
+        var albums: [SpotifyRecentAlbumDraft] = []
+        for item in response.items {
+            guard let track = item.track,
+                  let album = track.album,
+                  let albumID = album.id,
+                  seenAlbumIDs.insert(albumID).inserted else {
+                continue
+            }
+
+            let artist = album.artists?.map(\.name).joined(separator: ", ")
+                ?? track.artists.map(\.name).joined(separator: ", ")
+            albums.append(
+                SpotifyRecentAlbumDraft(
+                    id: albumID,
+                    name: album.name ?? track.name,
+                    artist: artist.isEmpty ? "Spotify" : artist,
+                    artworkURL: album.images.first?.url
+                )
+            )
+        }
+
+        return albums
+    }
+
+    static func albumSongDrafts(accessToken: String, albumID: String, limit: Int) async throws -> [SpotifySongDraft] {
+        let tracks = try await albumTracks(accessToken: accessToken, albumID: albumID, limit: limit)
+        return songDrafts(from: tracks, maxCount: limit)
     }
 
     private static func savedTracks(accessToken: String, limit: Int) async throws -> [SpotifyTrack] {
@@ -4831,6 +5583,96 @@ private enum SpotifyWebAPIClient {
         return tracks
     }
 
+    private static func albumTracks(accessToken: String, albumID: String, limit: Int) async throws -> [SpotifyTrack] {
+        var tracks: [SpotifyTrack] = []
+        var offset = 0
+        let pageSize = 50
+
+        while tracks.count < limit {
+            var components = URLComponents(string: "https://api.spotify.com/v1/albums/\(albumID)/tracks")
+            components?.queryItems = [
+                URLQueryItem(name: "limit", value: "\(min(pageSize, limit - tracks.count))"),
+                URLQueryItem(name: "offset", value: "\(offset)")
+            ]
+            guard let url = components?.url else { break }
+
+            let response = try await get(SpotifyAlbumTracksResponse.self, url: url, accessToken: accessToken)
+            guard response.items.isEmpty == false else { break }
+            tracks.append(contentsOf: response.items)
+            offset += pageSize
+            if response.next == nil { break }
+        }
+
+        return tracks
+    }
+
+    private static func followedArtists(accessToken: String, limit: Int) async throws -> [SpotifyArtist] {
+        var artists: [SpotifyArtist] = []
+        var after: String?
+        let pageSize = 50
+
+        while artists.count < limit {
+            var components = URLComponents(string: "https://api.spotify.com/v1/me/following")
+            let pageLimit = min(pageSize, limit - artists.count)
+            components?.queryItems = [
+                URLQueryItem(name: "type", value: "artist"),
+                URLQueryItem(name: "limit", value: "\(pageLimit)")
+            ] + (after.map { [URLQueryItem(name: "after", value: $0)] } ?? [])
+            guard let url = components?.url else { break }
+
+            let response = try await get(SpotifyFollowedArtistsResponse.self, url: url, accessToken: accessToken)
+            guard response.artists.items.isEmpty == false else { break }
+            artists.append(contentsOf: response.artists.items)
+            after = response.artists.cursors?.after
+            if response.artists.next == nil || after == nil { break }
+        }
+
+        return artists
+    }
+
+    private static func tracksFromFollowedArtists(
+        accessToken: String,
+        artistLimit: Int,
+        topTrackLimit: Int
+    ) async throws -> [SpotifyTrack] {
+        let artists = try await followedArtists(accessToken: accessToken, limit: artistLimit)
+        guard artists.isEmpty == false else { return [] }
+
+        var tracks: [SpotifyTrack] = []
+        let batchSize = 8
+        for batchStart in stride(from: 0, to: artists.count, by: batchSize) {
+            let batch = Array(artists[batchStart..<min(batchStart + batchSize, artists.count)])
+            let batchTracks = await withTaskGroup(of: [SpotifyTrack].self) { group in
+                for artist in batch {
+                    guard let artistID = artist.id else { continue }
+                    group.addTask {
+                        (try? await artistTopTracks(accessToken: accessToken, artistID: artistID, limit: topTrackLimit)) ?? []
+                    }
+                }
+
+                var result: [SpotifyTrack] = []
+                for await artistTracks in group {
+                    result.append(contentsOf: artistTracks)
+                }
+                return result
+            }
+            tracks.append(contentsOf: batchTracks)
+        }
+
+        return tracks
+    }
+
+    private static func artistTopTracks(accessToken: String, artistID: String, limit: Int) async throws -> [SpotifyTrack] {
+        var components = URLComponents(string: "https://api.spotify.com/v1/artists/\(artistID)/top-tracks")
+        components?.queryItems = [
+            URLQueryItem(name: "market", value: "US")
+        ]
+        guard let url = components?.url else { return [] }
+
+        let response = try await get(SpotifyArtistTopTracksResponse.self, url: url, accessToken: accessToken)
+        return Array(response.tracks.prefix(limit))
+    }
+
     private static func currentUserPlaylists(accessToken: String, limit: Int) async throws -> [SpotifyPlaylistSummary] {
         var playlists: [SpotifyPlaylistSummary] = []
         var offset = 0
@@ -4860,7 +5702,7 @@ private enum SpotifyWebAPIClient {
         let pageSize = 50
 
         while tracks.count < limit {
-            var components = URLComponents(string: "https://api.spotify.com/v1/playlists/\(playlistID)/tracks")
+            var components = URLComponents(string: "https://api.spotify.com/v1/playlists/\(playlistID)/items")
             components?.queryItems = [
                 URLQueryItem(name: "limit", value: "\(min(pageSize, limit - tracks.count))"),
                 URLQueryItem(name: "offset", value: "\(offset)")
@@ -4883,10 +5725,19 @@ private enum SpotifyWebAPIClient {
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         let (data, response) = try await URLSession.shared.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse, (200..<300).contains(httpResponse.statusCode) else {
-            throw SpotifyAuthError.invalidTokenResponse
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw SpotifyAPIError.requestFailed(-1)
         }
-        return try JSONDecoder().decode(type, from: data)
+        switch httpResponse.statusCode {
+        case 200..<300:
+            return try JSONDecoder().decode(type, from: data)
+        case 401:
+            throw SpotifyAPIError.unauthorized
+        case 429:
+            throw SpotifyAPIError.rateLimited
+        default:
+            throw SpotifyAPIError.requestFailed(httpResponse.statusCode)
+        }
     }
 
     static func startPlayback(accessToken: String, trackURI: String, device: SpotifyDevice?) async throws {
@@ -4899,7 +5750,7 @@ private enum SpotifyWebAPIClient {
         }
         guard let url = components?.url else { return }
 
-        var request = URLRequest(url: url)
+        var request = URLRequest(url: url, timeoutInterval: 5)
         request.httpMethod = "PUT"
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -4919,9 +5770,31 @@ private enum SpotifyWebAPIClient {
         }
     }
 
+    static func pausePlayback(accessToken: String) async throws {
+        guard let url = URL(string: "https://api.spotify.com/v1/me/player/pause") else { return }
+        var request = URLRequest(url: url, timeoutInterval: 7)
+        request.httpMethod = "PUT"
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+
+        let (_, response) = try await URLSession.shared.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw SpotifyPlaybackError.playbackFailed(-1)
+        }
+        switch httpResponse.statusCode {
+        case 200..<300:
+            return
+        case 403:
+            throw SpotifyPlaybackError.premiumRequired
+        case 404:
+            throw SpotifyPlaybackError.noActiveDevice
+        default:
+            throw SpotifyPlaybackError.playbackFailed(httpResponse.statusCode)
+        }
+    }
+
     static func preferredPlaybackDevice(accessToken: String) async throws -> SpotifyDevice? {
         guard let url = URL(string: "https://api.spotify.com/v1/me/player/devices") else { return nil }
-        var request = URLRequest(url: url)
+        var request = URLRequest(url: url, timeoutInterval: 5)
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
 
         let (data, response) = try await URLSession.shared.data(for: request)
@@ -4948,7 +5821,7 @@ private enum SpotifyWebAPIClient {
 
     private static func transferPlayback(accessToken: String, deviceID: String) async throws {
         guard let url = URL(string: "https://api.spotify.com/v1/me/player") else { return }
-        var request = URLRequest(url: url)
+        var request = URLRequest(url: url, timeoutInterval: 5)
         request.httpMethod = "PUT"
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -5002,6 +5875,13 @@ private struct SpotifySongDraft: Identifiable {
     let spotifyURI: String
 }
 
+private struct SpotifyRecentAlbumDraft: Identifiable {
+    let id: String
+    let name: String
+    let artist: String
+    let artworkURL: String?
+}
+
 private struct SpotifyStartPlaybackRequest: Encodable {
     let uris: [String]
 }
@@ -5041,6 +5921,20 @@ private struct SpotifySavedTracksResponse: Decodable {
     let next: String?
 }
 
+private struct SpotifyRecentlyPlayedTracksResponse: Decodable {
+    let items: [SpotifyRecentlyPlayedTrackItem]
+}
+
+private struct SpotifyRecentlyPlayedTrackItem: Decodable {
+    let track: SpotifyTrack?
+    let playedAt: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case track
+        case playedAt = "played_at"
+    }
+}
+
 private struct SpotifySavedTrackItem: Decodable {
     let track: SpotifyTrack?
 
@@ -5062,7 +5956,12 @@ private struct SpotifyPlaylistsResponse: Decodable {
 private struct SpotifyPlaylistSummary: Decodable {
     let id: String
     let name: String
+    let items: SpotifyPlaylistTracksSummary?
     let tracks: SpotifyPlaylistTracksSummary?
+
+    var itemCount: Int {
+        items?.total ?? tracks?.total ?? 0
+    }
 }
 
 private struct SpotifyPlaylistTracksSummary: Decodable {
@@ -5074,15 +5973,44 @@ private struct SpotifyPlaylistTracksResponse: Decodable {
     let next: String?
 }
 
+private struct SpotifyTracksPageResponse: Decodable {
+    let items: [SpotifyTrack]
+}
+
+private struct SpotifyAlbumTracksResponse: Decodable {
+    let items: [SpotifyTrack]
+    let next: String?
+}
+
+private struct SpotifyArtistTopTracksResponse: Decodable {
+    let tracks: [SpotifyTrack]
+}
+
+private struct SpotifyFollowedArtistsResponse: Decodable {
+    let artists: SpotifyFollowedArtistsPage
+}
+
+private struct SpotifyFollowedArtistsPage: Decodable {
+    let items: [SpotifyArtist]
+    let next: String?
+    let cursors: SpotifyFollowedArtistsCursors?
+}
+
+private struct SpotifyFollowedArtistsCursors: Decodable {
+    let after: String?
+}
+
 private struct SpotifyPlaylistTrackItem: Decodable {
     let track: SpotifyTrack?
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        track = try? container.decode(SpotifyTrack.self, forKey: .track)
+        track = (try? container.decode(SpotifyTrack.self, forKey: .item))
+            ?? (try? container.decode(SpotifyTrack.self, forKey: .track))
     }
 
     private enum CodingKeys: String, CodingKey {
+        case item
         case track
     }
 }
@@ -5104,10 +6032,14 @@ private struct SpotifyTrack: Decodable {
 }
 
 private struct SpotifyArtist: Decodable {
+    let id: String?
     let name: String
 }
 
 private struct SpotifyAlbum: Decodable {
+    let id: String?
+    let name: String?
+    let artists: [SpotifyArtist]?
     let images: [SpotifyImage]
 }
 
@@ -5517,11 +6449,7 @@ private struct BadgeCircle: View {
                     )
                 )
 
-            if let artworkImage = PlayerArtworkWarmupCache.shared.artwork(for: badge.song) ?? badge.song.artworkImage {
-                Image(uiImage: artworkImage)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-            }
+            SongArtworkLayer(song: badge.song)
         }
         .frame(width: badge.radius * 2, height: badge.radius * 2)
         .clipShape(Circle())
@@ -5822,11 +6750,7 @@ private struct LyricsOverlayView: View {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .fill(LinearGradient(colors: song.colors, startPoint: .topLeading, endPoint: .bottomTrailing))
 
-            if let artworkImage = song.artworkImage {
-                Image(uiImage: artworkImage)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-            }
+            SongArtworkLayer(song: song)
         }
         .frame(width: 74, height: 74)
         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
@@ -6792,14 +7716,10 @@ private struct AdjacentPlayerPreviewCard: View {
                 song.magicColor
                     .opacity(0.92)
 
-                if let image = PlayerArtworkWarmupCache.shared.artwork(for: song) ?? song.artworkImage {
-                    Image(uiImage: image)
-                        .resizable()
-                        .scaledToFill()
-                        .frame(width: proxy.size.width, height: coverHeight)
-                        .clipped()
-                        .frame(maxHeight: .infinity, alignment: .top)
-                }
+                SongArtworkLayer(song: song)
+                    .frame(width: proxy.size.width, height: coverHeight)
+                    .clipped()
+                    .frame(maxHeight: .infinity, alignment: .top)
 
                 LinearGradient(
                     colors: [
@@ -6837,13 +7757,9 @@ private struct PlayerNextPeek: View {
             song.magicColor
                 .opacity(0.72)
 
-            if let image = PlayerArtworkWarmupCache.shared.artwork(for: song) ?? song.artworkImage {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFill()
-                    .opacity(0.38)
-                    .clipped()
-            }
+            SongArtworkLayer(song: song)
+                .opacity(0.38)
+                .clipped()
 
             LinearGradient(
                 colors: [.white.opacity(0.08), .black.opacity(0.20)],
@@ -6908,11 +7824,7 @@ private struct PlayerCoverArtwork: View {
         ZStack {
             LinearGradient(colors: song.colors, startPoint: .topLeading, endPoint: .bottomTrailing)
 
-            if let artworkImage = PlayerArtworkWarmupCache.shared.artwork(for: song) ?? song.artworkImage {
-                Image(uiImage: artworkImage)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-            }
+            SongArtworkLayer(song: song)
 
             LinearGradient(
                 stops: [
@@ -6943,9 +7855,11 @@ private struct PlayerCoverArtwork: View {
     }
 }
 
-private final class PlayerArtworkWarmupCache {
+@MainActor
+private final class PlayerArtworkWarmupCache: ObservableObject {
     static let shared = PlayerArtworkWarmupCache()
 
+    @Published private(set) var revision = 0
     private let artworkCache = NSCache<NSNumber, UIImage>()
     private var warmingIDs = Set<Int>()
 
@@ -6959,24 +7873,47 @@ private final class PlayerArtworkWarmupCache {
 
     func preload(songs: [DemoSong]) {
         let targets = songs.filter { song in
-            artworkCache.object(forKey: NSNumber(value: song.id)) == nil &&
-            warmingIDs.contains(song.id) == false
+            let hasLocalArtwork = song.artworkImage != nil || song.mediaItem?.artwork != nil
+            guard hasLocalArtwork else { return false }
+            return artworkCache.object(forKey: NSNumber(value: song.id)) == nil &&
+                warmingIDs.contains(song.id) == false
         }
         guard targets.isEmpty == false else { return }
         targets.forEach { warmingIDs.insert($0.id) }
 
         Task.detached(priority: .utility) { [weak self] in
-            var preparedImages: [(Int, UIImage)] = []
-            for song in targets {
-                if let preparedArtwork = await song.artworkImage?.byPreparingForDisplay() {
-                    preparedImages.append((song.id, preparedArtwork))
+            let batchSize = 12
+            for batchStart in stride(from: 0, to: targets.count, by: batchSize) {
+                let batch = Array(targets[batchStart..<min(batchStart + batchSize, targets.count)])
+                let preparedImages = await withTaskGroup(of: (Int, UIImage?).self) { group in
+                    for song in batch {
+                        group.addTask {
+                            var image = song.artworkImage
+                            if image == nil {
+                                image = song.mediaItem?.artwork?.image(at: CGSize(width: 320, height: 320))
+                            }
+                            return (song.id, await image?.byPreparingForDisplay())
+                        }
+                    }
+
+                    var results: [(Int, UIImage?)] = []
+                    for await result in group {
+                        results.append(result)
+                    }
+                    return results
+                }
+
+                await MainActor.run {
+                    preparedImages.forEach { id, image in
+                        if let image {
+                            self?.artworkCache.setObject(image, forKey: NSNumber(value: id))
+                        }
+                    }
+                    self?.revision &+= 1
                 }
             }
 
             await MainActor.run {
-                preparedImages.forEach { id, image in
-                    self?.artworkCache.setObject(image, forKey: NSNumber(value: id))
-                }
                 targets.forEach { self?.warmingIDs.remove($0.id) }
             }
         }
@@ -7478,11 +8415,7 @@ private struct PlayerPillArtworkThumb: View {
         ZStack {
             LinearGradient(colors: song.colors, startPoint: .topLeading, endPoint: .bottomTrailing)
 
-            if let artworkImage = PlayerArtworkWarmupCache.shared.artwork(for: song) ?? song.artworkImage {
-                Image(uiImage: artworkImage)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-            }
+            SongArtworkLayer(song: song)
         }
         .frame(width: 34, height: 34)
         .clipShape(Circle())
@@ -7576,11 +8509,7 @@ private struct PlayerPillNextPeek: View {
             Circle()
                 .fill(LinearGradient(colors: song.colors, startPoint: .topLeading, endPoint: .bottomTrailing))
 
-            if let artworkImage = PlayerArtworkWarmupCache.shared.artwork(for: song) ?? song.artworkImage {
-                Image(uiImage: artworkImage)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-            }
+            SongArtworkLayer(song: song)
         }
         .frame(width: 30, height: 30)
         .clipShape(Circle())
@@ -8299,11 +9228,7 @@ private struct RotatingAlbumArt: View {
         ZStack {
             LinearGradient(colors: song.colors, startPoint: .topLeading, endPoint: .bottomTrailing)
 
-            if let artworkImage = song.artworkImage {
-                Image(uiImage: artworkImage)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-            }
+            SongArtworkLayer(song: song)
 
             Circle()
                 .fill(.black.opacity(0.20))
@@ -8788,6 +9713,7 @@ private struct DemoSong: Identifiable, Equatable {
     let storeID: String?
     let previewURL: String?
     let spotifyURI: String?
+    let artworkURL: String?
     let artworkImage: UIImage?
     let backdropImage: UIImage?
     let lyricsText: String?
@@ -8803,6 +9729,7 @@ private struct DemoSong: Identifiable, Equatable {
         storeID: String? = nil,
         previewURL: String? = nil,
         spotifyURI: String? = nil,
+        artworkURL: String? = nil,
         artworkImage: UIImage? = nil,
         backdropImage: UIImage? = nil,
         lyricsText: String? = nil,
@@ -8817,6 +9744,7 @@ private struct DemoSong: Identifiable, Equatable {
         self.storeID = storeID
         self.previewURL = previewURL
         self.spotifyURI = spotifyURI
+        self.artworkURL = artworkURL
         self.artworkImage = artworkImage
         self.backdropImage = backdropImage
         self.lyricsText = lyricsText
@@ -8832,6 +9760,14 @@ private struct DemoSong: Identifiable, Equatable {
         mediaItem != nil || previewURL != nil
     }
 
+    var hasValidSpotifyIdentity: Bool {
+        source == .spotify && spotifyURI?.hasPrefix("spotify:track:") == true
+    }
+
+    var isHomeSurfaceDisplayable: Bool {
+        isHomeSurfacePlayable || hasValidSpotifyIdentity
+    }
+
     static func == (lhs: DemoSong, rhs: DemoSong) -> Bool {
         lhs.id == rhs.id &&
         lhs.title == rhs.title &&
@@ -8839,6 +9775,7 @@ private struct DemoSong: Identifiable, Equatable {
         lhs.storeID == rhs.storeID &&
         lhs.previewURL == rhs.previewURL &&
         lhs.spotifyURI == rhs.spotifyURI &&
+        lhs.artworkURL == rhs.artworkURL &&
         lhs.source == rhs.source &&
         (lhs.artworkImage != nil) == (rhs.artworkImage != nil) &&
         (lhs.backdropImage != nil) == (rhs.backdropImage != nil)
@@ -9013,6 +9950,38 @@ private struct HomeInteractiveSongSquare: View {
     }
 }
 
+private struct SongArtworkLayer: View {
+    let song: DemoSong
+    @ObservedObject private var artworkCache = PlayerArtworkWarmupCache.shared
+
+    var body: some View {
+        let _ = artworkCache.revision
+        Group {
+        if let artworkImage = artworkCache.artwork(for: song) ?? song.artworkImage {
+            Image(uiImage: artworkImage)
+                .resizable()
+                .aspectRatio(contentMode: .fill)
+        } else if let artworkURL = song.artworkURL,
+                  let url = URL(string: artworkURL) {
+            AsyncImage(url: url, transaction: Transaction(animation: nil)) { phase in
+                if case let .success(image) = phase {
+                    image
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                } else {
+                    Color.clear
+                }
+            }
+        } else {
+            Color.clear
+        }
+        }
+        .task(id: song.id) {
+            artworkCache.preload(songs: [song])
+        }
+    }
+}
+
 private struct SongSquare: View {
     let song: DemoSong
     let isPlaying: Bool
@@ -9024,13 +9993,9 @@ private struct SongSquare: View {
             ZStack {
                 LinearGradient(colors: song.colors, startPoint: .topLeading, endPoint: .bottomTrailing)
 
-                if let artworkImage = PlayerArtworkWarmupCache.shared.artwork(for: song) ?? song.artworkImage {
-                    Image(uiImage: artworkImage)
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
-                        .frame(width: side, height: side)
-                        .clipped()
-                }
+                SongArtworkLayer(song: song)
+                    .frame(width: side, height: side)
+                    .clipped()
 
             }
             .frame(width: side, height: side)
@@ -9081,16 +10046,16 @@ private struct SongSquare: View {
                 if song.source == .spotify {
                     HStack(spacing: 4) {
                         Image(systemName: "waveform")
-                            .font(.system(size: 10, weight: .black))
+                            .font(.system(size: 8, weight: .black))
                         Text("SPOTIFY")
-                            .font(.system(size: 10, weight: .black, design: .rounded))
+                            .font(.system(size: 8, weight: .black, design: .rounded))
                     }
                     .foregroundStyle(.black.opacity(0.86))
-                    .padding(.horizontal, 8)
-                    .frame(height: 24)
+                    .padding(.horizontal, 6)
+                    .frame(height: 18)
                     .background(Color(red: 0.1, green: 0.86, blue: 0.36), in: Capsule())
-                    .shadow(color: Color(red: 0.1, green: 0.86, blue: 0.36).opacity(0.42), radius: 9, y: 3)
-                    .padding(7)
+                    .shadow(color: Color(red: 0.1, green: 0.86, blue: 0.36).opacity(0.30), radius: 5, y: 2)
+                    .padding(5)
                 }
             }
             .overlay(alignment: .bottomLeading) {
