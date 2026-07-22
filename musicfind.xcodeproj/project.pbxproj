@@ -6,10 +6,6 @@
 	objectVersion = 100;
 	objects = {
 
-/* Begin PBXBuildFile section */
-		A10000012FF5000000000001 /* SpotifyiOS in Frameworks */ = {isa = PBXBuildFile; productRef = A10000022FF5000000000001 /* SpotifyiOS */; };
-/* End PBXBuildFile section */
-
 /* Begin PBXContainerItemProxy section */
 		28C82A6E2FF3943D008A2DEE /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -55,7 +51,6 @@
 		28C82A5B2FF3943C008A2DEE /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			files = (
-				A10000012FF5000000000001 /* SpotifyiOS in Frameworks */,
 			);
 		};
 		28C82A6A2FF3943D008A2DEE /* Frameworks */ = {
@@ -109,7 +104,6 @@
 			);
 			name = musicfind;
 			packageProductDependencies = (
-				A10000022FF5000000000001 /* SpotifyiOS */,
 			);
 			productName = musicfind;
 			productReference = 28C82A5E2FF3943C008A2DEE /* musicfind.app */;
@@ -190,7 +184,6 @@
 			mainGroup = 28C82A552FF3943C008A2DEE;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
-				A10000032FF5000000000001 /* XCRemoteSwiftPackageReference "ios-sdk" */,
 			);
 			preferredProjectObjectVersion = 100;
 			productRefGroup = 28C82A5F2FF3943C008A2DEE /* Products */;
@@ -389,7 +382,6 @@
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "musicfind-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = FlipMusic;
-				INFOPLIST_KEY_CFBundleURLTypes = "{\n    CFBundleURLName = \"Spotify Callback\";\n    CFBundleURLSchemes =     (\n        musicfind\n    );\n}";
 				INFOPLIST_KEY_NSAppleMusicUsageDescription = "用于连接 Apple Music 并读取你的音乐授权状态。";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -400,10 +392,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				OTHER_LDFLAGS = (
-					"$(inherited)",
-					"-ObjC",
-				);
+				OTHER_LDFLAGS = "$(inherited)";
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.xiangchengjin.musicfind.red;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -429,7 +418,6 @@
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "musicfind-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = FlipMusic;
-				INFOPLIST_KEY_CFBundleURLTypes = "{\n    CFBundleURLName = \"Spotify Callback\";\n    CFBundleURLSchemes =     (\n        musicfind\n    );\n}";
 				INFOPLIST_KEY_NSAppleMusicUsageDescription = "用于连接 Apple Music 并读取你的音乐授权状态。";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -440,10 +428,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				OTHER_LDFLAGS = (
-					"$(inherited)",
-					"-ObjC",
-				);
+				OTHER_LDFLAGS = "$(inherited)";
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.xiangchengjin.musicfind.red;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -577,25 +562,6 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
-
-/* Begin XCRemoteSwiftPackageReference section */
-		A10000032FF5000000000001 /* XCRemoteSwiftPackageReference "ios-sdk" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/spotify/ios-sdk.git";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 5.0.1;
-			};
-		};
-/* End XCRemoteSwiftPackageReference section */
-
-/* Begin XCSwiftPackageProductDependency section */
-		A10000022FF5000000000001 /* SpotifyiOS */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = A10000032FF5000000000001 /* XCRemoteSwiftPackageReference "ios-sdk" */;
-			productName = SpotifyiOS;
-		};
-/* End XCSwiftPackageProductDependency section */
 
 	};
 	rootObject = 28C82A562FF3943C008A2DEE /* Project object */;
