@@ -25,6 +25,7 @@ struct ContentView: View {
     @State private var playerPillFrame: CGRect = .zero
     @State private var homeDriftAmount: CGFloat = 0
     @State private var homeSongs: [DemoSong] = []
+    @State private var availableHomeSongs: [DemoSong] = []
     @State private var homePendingSongs: [DemoSong] = []
     @State private var homeFlipVariations: [Int: HomeFlipVariation] = [:]
     @State private var homeFlippingIndices: Set<Int> = []
@@ -50,13 +51,8 @@ struct ContentView: View {
 
     private let spacing: CGFloat = 8
     private var songs: [DemoSong] {
-        let dislikedKeys = homeDislikedSongKeysSet()
-        let visibleSongs = musicConnector.homeSurfaceSongs.filter {
-            guard $0.isHomeSurfaceDisplayable else { return false }
-            return dislikedKeys.isEmpty || dislikedKeys.contains(homeDislikeKey(for: $0)) == false
-        }
-        if visibleSongs.isEmpty == false {
-            return visibleSongs
+        if availableHomeSongs.isEmpty == false {
+            return availableHomeSongs
         }
 
         return homeLoadingPlaceholders
@@ -64,9 +60,6 @@ struct ContentView: View {
 
     private var homeLoadingPlaceholders: [DemoSong] {
         (0..<96).map { DemoSong.placeholder(id: -20_000 - $0, colors: []) }
-    }
-    private var homeSongSourceSignature: String {
-        homeSourceSignature(for: songs)
     }
     private var visibleHomeSongs: [DemoSong] {
         homeSongs.isEmpty ? songs : homeSongs
@@ -279,6 +272,7 @@ struct ContentView: View {
         }
         .onAppear {
             musicConnector.startPlaybackSync()
+            refreshAvailableHomeSongs()
             syncHomeSongsIfNeeded()
             shakeObserver.start()
             scheduleHomeIdleDrift()
@@ -312,13 +306,10 @@ struct ContentView: View {
                 scheduleHomeIdleDrift()
             }
         }
-        .onChange(of: homeSongSourceSignature) { _, _ in
+        .onReceive(musicConnector.$songCacheRevision.dropFirst()) { _ in
+            refreshAvailableHomeSongs()
             guard isHomeAppendingMore == false else { return }
             syncHomeSongsIfNeeded()
-            ensureHomeHasEnoughSongsIfNeeded()
-        }
-        .onChange(of: songs.map { "\($0.id):\($0.artworkImage != nil)" }) { _, _ in
-            refreshVisibleHomeSongMetadata()
             ensureHomeHasEnoughSongsIfNeeded()
         }
         .onReceive(shakeObserver.$shakeEventID.dropFirst()) { _ in
@@ -352,6 +343,14 @@ struct ContentView: View {
         let queueSnapshot = compactHomePlaybackSnapshot(startingWith: song)
         nowPlaying = song
         musicConnector.queuePlayback(for: song, in: queueSnapshot)
+    }
+
+    private func refreshAvailableHomeSongs() {
+        let dislikedKeys = homeDislikedSongKeysSet()
+        availableHomeSongs = musicConnector.homeSurfaceSongs.filter { song in
+            guard song.isHomeSurfaceDisplayable else { return false }
+            return dislikedKeys.isEmpty || dislikedKeys.contains(homeDislikeKey(for: song)) == false
+        }
     }
 
     private func compactHomePlaybackSnapshot(startingWith song: DemoSong) -> [DemoSong] {
@@ -505,7 +504,7 @@ struct ContentView: View {
             homeSourceSignature = sourceSignature
             homeSongs = initialHomeSongs()
             rememberRecentlyShownHomeSongs(homeSongs)
-            PlayerArtworkWarmupCache.shared.preload(songs: Array(homeSongs.prefix(80)))
+            PlayerArtworkWarmupCache.shared.preload(songs: Array(homeSongs.prefix(32)))
             resetHomeFlipState()
             ensureHomeHasEnoughSongsIfNeeded()
             return
@@ -554,7 +553,7 @@ struct ContentView: View {
         homeFlippingIndices = Set(homeSongs.indices)
         resetHomeFlipState()
         rememberRecentlyShownHomeSongs(homeSongs)
-        PlayerArtworkWarmupCache.shared.preload(songs: Array(homeSongs.prefix(48)))
+        PlayerArtworkWarmupCache.shared.preload(songs: Array(homeSongs.prefix(24)))
     }
 
     private func refreshVisibleHomeSongMetadata() {
@@ -574,7 +573,7 @@ struct ContentView: View {
         guard refreshedSongs.map(\.id) == homeSongs.map(\.id) else { return }
         homeSongs = refreshedSongs
         homePendingSongs = refreshedPendingSongs
-        PlayerArtworkWarmupCache.shared.preload(songs: Array((refreshedSongs + refreshedPendingSongs).prefix(48)))
+        PlayerArtworkWarmupCache.shared.preload(songs: Array((refreshedSongs + refreshedPendingSongs).prefix(24)))
     }
 
     private func mergedHomeSong(current: DemoSong, latest: DemoSong) -> DemoSong {
@@ -587,6 +586,8 @@ struct ContentView: View {
             colors: latest.artworkImage == nil ? current.colors : latest.colors,
             mediaItem: latest.mediaItem ?? current.mediaItem,
             storeID: latest.storeID ?? current.storeID,
+            albumPersistentID: latest.albumPersistentID ?? current.albumPersistentID,
+            albumTrackCount: max(latest.albumTrackCount, current.albumTrackCount),
             previewURL: latest.previewURL ?? current.previewURL,
             artworkURL: latest.artworkURL ?? current.artworkURL,
             artworkImage: artworkImage,
@@ -604,6 +605,7 @@ struct ContentView: View {
         var dislikedKeys = homeDislikedSongKeysSet()
         dislikedKeys.insert(homeDislikeKey(for: song))
         homeDislikedSongKeysRaw = dislikedKeys.sorted().joined(separator: "\n")
+        refreshAvailableHomeSongs()
         rememberTemporarilySkippedHomeSongs([song.id])
 
         resetHomeFlipState()
@@ -792,7 +794,7 @@ struct ContentView: View {
         isHomeFlipping = true
         isHomeAppendingMore = true
         rememberRecentlyShownHomeSongs(orderedAdditions)
-        PlayerArtworkWarmupCache.shared.preload(songs: Array(orderedAdditions.prefix(80)))
+        PlayerArtworkWarmupCache.shared.preload(songs: Array(orderedAdditions.prefix(24)))
 
         let generation = homeFlipGeneration
         homeFlipTask = Task { @MainActor in
@@ -841,7 +843,7 @@ struct ContentView: View {
         homeAppearingFlipIndices = []
         isHomeFlipping = false
         rememberRecentlyShownHomeSongs(orderedAdditions)
-        PlayerArtworkWarmupCache.shared.preload(songs: Array(orderedAdditions.prefix(80)))
+        PlayerArtworkWarmupCache.shared.preload(songs: Array(orderedAdditions.prefix(24)))
         return orderedAdditions.count
     }
 
@@ -865,7 +867,7 @@ struct ContentView: View {
         homeFlippingIndices = Set(nextSongs.indices)
         homeAppearingFlipIndices = []
         isHomeFlipping = true
-        PlayerArtworkWarmupCache.shared.preload(songs: Array(nextSongs.prefix(120)))
+        PlayerArtworkWarmupCache.shared.preload(songs: Array(nextSongs.prefix(32)))
 
         homeFlipTask = Task { @MainActor in
             let generator = UIImpactFeedbackGenerator(style: hapticStyle)
@@ -1535,7 +1537,7 @@ private struct GreetingBadge: View {
     let mood: HomeTimeMood
 
     var body: some View {
-        TimelineView(.animation) { timeline in
+        TimelineView(.animation(minimumInterval: 1.0 / 12.0)) { timeline in
             let phase = timeline.date.timeIntervalSinceReferenceDate
             let float = sin(phase * 1.6)
 
@@ -2205,20 +2207,31 @@ private struct ArtistPlaybackOption: Identifiable {
 
 private final class MusicConnectionManager: ObservableObject {
     @Published var isConnectingAppleMusic = false
-    @Published var librarySongs: [DemoSong] = []
-    @Published var libraryAlbumCards: [DemoSong] = []
+    @Published var librarySongs: [DemoSong] = [] {
+        didSet { rebuildSongCachesIfNeeded() }
+    }
+    @Published var libraryAlbumCards: [DemoSong] = [] {
+        didSet { rebuildSongCachesIfNeeded() }
+    }
     @Published var applePlaylists: [MusicPlaylistOption] = []
-    @Published var homeFeedSongs: [DemoSong] = []
+    @Published var homeFeedSongs: [DemoSong] = [] {
+        didSet { rebuildSongCachesIfNeeded() }
+    }
     @Published private(set) var isInitialLibraryLoading = true
     @Published private(set) var isHomeFeedRefreshing = false
-    @Published var recommendedSongs: [DemoSong] = []
-    @Published var discoveryExtraSongs: [DemoSong] = []
+    @Published var recommendedSongs: [DemoSong] = [] {
+        didSet { rebuildSongCachesIfNeeded() }
+    }
+    @Published var discoveryExtraSongs: [DemoSong] = [] {
+        didSet { rebuildSongCachesIfNeeded() }
+    }
     @Published var message: String?
     @Published var currentSong: DemoSong?
     @Published var playingSongID: Int?
     @Published var isPlaying = false
     @Published var isPlaybackTransitioning = false
     @Published var showPlaybackLoadingToast = false
+    @Published private(set) var songCacheRevision = 0
     @Published var moodPreference = MusicMoodPreference.load()
     @Published private var fetchedLyricsByKey: [String: String] = [:]
     @Published private var loadingLyricKeys: Set<String> = []
@@ -2259,29 +2272,39 @@ private final class MusicConnectionManager: ObservableObject {
     private var nextPlaybackPrefetchPage = 1
     private var loadedPlaybackPrefetchPages = Set<Int>()
     private var lastRecommendationMood: HomeTimeMood?
+    private var discoverySongsCache: [DemoSong] = []
+    private var homeSurfaceSongsCache: [DemoSong] = []
+    private var suppressSongCacheRebuild = false
 
     var discoverySongs: [DemoSong] {
-        let baseSongs = homeLibraryItems
-        let recommendationSongs = aiRecommendationsEnabled ? recommendedSongs : []
-        return uniqueDiscoverySongs(
-            from: homeFeedSongs + interleavedDiscoverySongs(librarySongs: baseSongs, recommendedSongs: recommendationSongs) + discoveryExtraSongs
-        )
+        discoverySongsCache
     }
 
     var homeSurfaceSongs: [DemoSong] {
+        homeSurfaceSongsCache
+    }
+
+    private func rebuildSongCaches() {
+        let libraryItems = homeLibraryItems
         let recommendationSongs = aiRecommendationsEnabled ? recommendedSongs : []
-        let rotatedLibrarySongs = rotatedHomeSongs(homeLibraryItems, salt: homeFeedSessionSalt * 0.73 + 19)
+        let rotatedLibrarySongs = rotatedHomeSongs(libraryItems, salt: homeFeedSessionSalt * 0.73 + 19)
         let connectedSongs = uniqueDiscoverySongs(
             from: homeFeedSongs
                 + interleavedDiscoverySongs(librarySongs: rotatedLibrarySongs, recommendedSongs: recommendationSongs)
                 + discoveryExtraSongs
         )
-
         if connectedSongs.isEmpty == false {
-            return connectedSongs
+            homeSurfaceSongsCache = connectedSongs
+        } else {
+            homeSurfaceSongsCache = libraryItems.filter(\.source.isRealDiscoverySource)
         }
+        discoverySongsCache = homeSurfaceSongsCache
+        songCacheRevision &+= 1
+    }
 
-        return discoverySongs.filter(\.source.isRealDiscoverySource)
+    private func rebuildSongCachesIfNeeded() {
+        guard suppressSongCacheRebuild == false else { return }
+        rebuildSongCaches()
     }
 
     private var homeLibraryItems: [DemoSong] {
@@ -2499,6 +2522,7 @@ private final class MusicConnectionManager: ObservableObject {
         applePlaylists = appleMusicPlaylists()
         let items = mediaItemsFromLibrary()
         let palettes = DemoSong.library.map(\.colors)
+        suppressSongCacheRebuild = true
         librarySongs = items.enumerated().map { index, item in
             let shouldLoadArtworkImmediately = index < 64
             let artworkImage = shouldLoadArtworkImmediately
@@ -2521,6 +2545,8 @@ private final class MusicConnectionManager: ObservableObject {
             )
         }
         libraryAlbumCards = makeAlbumCards(from: librarySongs, palettes: palettes)
+        suppressSongCacheRebuild = false
+        rebuildSongCaches()
         message = librarySongs.isEmpty
             ? "Apple Music 已授权，但没有读到已加入资料库的歌曲。请先在 Apple Music 里把歌曲添加到资料库，并确认系统设置里允许访问媒体与 Apple Music。"
             : "已读取 \(librarySongs.count) 首歌曲、\(libraryAlbumCards.count) 张专辑"
@@ -2541,8 +2567,11 @@ private final class MusicConnectionManager: ObservableObject {
             refreshRecommendations()
         } else {
             recommendationTask?.cancel()
+            suppressSongCacheRebuild = true
             recommendedSongs = []
             discoveryExtraSongs = []
+            suppressSongCacheRebuild = false
+            rebuildSongCaches()
             lastRecommendationMood = nil
             refreshHomeFeed()
         }
@@ -3898,16 +3927,22 @@ private final class MusicConnectionManager: ObservableObject {
     private func refreshRecommendations() {
         guard aiRecommendationsEnabled else {
             recommendationTask?.cancel()
+            suppressSongCacheRebuild = true
             recommendedSongs = []
             discoveryExtraSongs = []
+            suppressSongCacheRebuild = false
+            rebuildSongCaches()
             nextPlaybackPrefetchPage = 1
             loadedPlaybackPrefetchPages.removeAll()
             lastRecommendationMood = nil
             return
         }
         recommendationTask?.cancel()
+        suppressSongCacheRebuild = true
         recommendedSongs = []
         discoveryExtraSongs = []
+        suppressSongCacheRebuild = false
+        rebuildSongCaches()
         nextPlaybackPrefetchPage = 1
         loadedPlaybackPrefetchPages.removeAll()
         lastRecommendationMood = HomeTimeMood.current
@@ -4717,7 +4752,7 @@ private final class ShakeMotionObserver: ObservableObject {
         lastStrikeDate = .distantPast
         lastMagnitude = 1.0
         lastAcceleration = nil
-        manager.accelerometerUpdateInterval = 1.0 / 45.0
+        manager.accelerometerUpdateInterval = 1.0 / 20.0
         manager.startAccelerometerUpdates(to: .main) { [weak self] data, _ in
             guard let self, let data else { return }
             self.handleAcceleration(data.acceleration)
@@ -6061,7 +6096,7 @@ private final class PlayerArtworkWarmupCache: ObservableObject {
     private var warmingIDs = Set<Int>()
 
     private init() {
-        artworkCache.countLimit = 240
+        artworkCache.countLimit = 120
     }
 
     func artwork(for song: DemoSong) -> UIImage? {
