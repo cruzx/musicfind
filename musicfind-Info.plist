@@ -23,7 +23,7 @@
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>NSAppleMusicUsageDescription</key>
-	<string>用于连接 Apple Music 并读取你的音乐授权状态。</string>
+	<string>用于读取你的 Apple Music 资料库、歌单、专辑和播放信息，在 App 内展示并播放你常听的音乐。</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

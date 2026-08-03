@@ -382,7 +382,7 @@
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "musicfind-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = FlipMusic;
-				INFOPLIST_KEY_NSAppleMusicUsageDescription = "用于连接 Apple Music 并读取你的音乐授权状态。";
+				INFOPLIST_KEY_NSAppleMusicUsageDescription = "用于读取你的 Apple Music 资料库、歌单、专辑和播放信息，在 App 内展示并播放你常听的音乐。";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
@@ -418,7 +418,7 @@
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "musicfind-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = FlipMusic;
-				INFOPLIST_KEY_NSAppleMusicUsageDescription = "用于连接 Apple Music 并读取你的音乐授权状态。";
+				INFOPLIST_KEY_NSAppleMusicUsageDescription = "用于读取你的 Apple Music 资料库、歌单、专辑和播放信息，在 App 内展示并播放你常听的音乐。";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
