@@ -13,6 +13,7 @@ import MediaPlayer
 import AVFoundation
 
 struct ContentView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @State private var activeTab: AppTab = .home
     @State private var nowPlaying = DemoSong.library[0]
     @StateObject private var musicConnector = MusicConnectionManager()
@@ -276,6 +277,9 @@ struct ContentView: View {
             syncHomeSongsIfNeeded()
             shakeObserver.start()
             scheduleHomeIdleDrift()
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            musicConnector.handleScenePhase(newPhase)
         }
         .onDisappear {
             musicConnector.stopPlaybackSync()
@@ -2284,6 +2288,8 @@ private final class MusicConnectionManager: ObservableObject {
     private var discoverySongsCache: [DemoSong] = []
     private var homeSurfaceSongsCache: [DemoSong] = []
     private var suppressSongCacheRebuild = false
+    private var didPerformInitialLibraryRefresh = false
+    private let musicPlayer = MPMusicPlayerController.systemMusicPlayer
 
     var discoverySongs: [DemoSong] {
         discoverySongsCache
@@ -2536,6 +2542,11 @@ private final class MusicConnectionManager: ObservableObject {
     }
 
     func refreshAppleMusicLibraryIfPossible() async {
+        guard didPerformInitialLibraryRefresh == false else {
+            syncPlaybackState()
+            return
+        }
+        didPerformInitialLibraryRefresh = true
         initialLoadingFinishTask?.cancel()
         initialLoadingTimeoutTask?.cancel()
         initialLibraryLoadingStartedAt = Date()
@@ -2951,7 +2962,7 @@ private final class MusicConnectionManager: ObservableObject {
         queuedPlaybackTask = Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(delay))
             guard !Task.isCancelled, requestID == playbackRequestID else { return }
-            let player = MPMusicPlayerController.applicationMusicPlayer
+            let player = musicPlayer
             lastPlayerQueueCommitTime = Date().timeIntervalSinceReferenceDate
             setPlaybackQueue(on: player, startingWith: song, in: queueSnapshot)
             prepareAndStartPlayback(on: player, song: song, queueSongs: queueSnapshot, requestID: requestID)
@@ -3006,7 +3017,7 @@ private final class MusicConnectionManager: ObservableObject {
             }
             return
         }
-        let player = MPMusicPlayerController.applicationMusicPlayer
+        let player = musicPlayer
         if player.playbackState == .playing, isPlayerCurrentlyOn(song, player: player) {
             player.pause()
             autoAdvanceTask?.cancel()
@@ -3036,7 +3047,7 @@ private final class MusicConnectionManager: ObservableObject {
             return
         }
 
-        let player = MPMusicPlayerController.applicationMusicPlayer
+        let player = musicPlayer
         player.beginGeneratingPlaybackNotifications()
         let center = NotificationCenter.default
         playbackObservers = [
@@ -3068,7 +3079,19 @@ private final class MusicConnectionManager: ObservableObject {
         playbackObservers = []
         autoAdvanceTask?.cancel()
         autoAdvanceTask = nil
-        MPMusicPlayerController.applicationMusicPlayer.endGeneratingPlaybackNotifications()
+        musicPlayer.endGeneratingPlaybackNotifications()
+    }
+
+    func handleScenePhase(_ phase: ScenePhase) {
+        switch phase {
+        case .active:
+            startPlaybackSync()
+            syncPlaybackState()
+        case .inactive, .background:
+            syncPlaybackState()
+        @unknown default:
+            break
+        }
     }
 
     func lyricLines(for song: DemoSong) -> [String] {
@@ -3076,7 +3099,7 @@ private final class MusicConnectionManager: ObservableObject {
             song.lyricsText,
             currentSong?.id == song.id ? currentSong?.lyricsText : nil,
             fetchedLyricsByKey[lyricsCacheKey(for: song)],
-            MPMusicPlayerController.applicationMusicPlayer.nowPlayingItem.flatMap(Self.extractLyrics(from:))
+            musicPlayer.nowPlayingItem.flatMap(Self.extractLyrics(from:))
         ]
 
         for candidate in candidates {
@@ -3114,7 +3137,7 @@ private final class MusicConnectionManager: ObservableObject {
             return
         }
 
-        let player = MPMusicPlayerController.applicationMusicPlayer
+        let player = musicPlayer
         let playbackState = player.playbackState
         isPlaying = isPlaybackTransitioning ? true : playbackState == .playing
         guard let item = player.nowPlayingItem else {
@@ -3303,9 +3326,8 @@ private final class MusicConnectionManager: ObservableObject {
         pending.didStart = true
         pendingPlaybackStart = pending
         previewPlaybackTask?.cancel()
-        player.currentPlaybackTime = 0
+        player.skipToBeginning()
         player.play()
-        player.currentPlaybackTime = 0
         schedulePlaybackPrefetch(
             startingWith: pending.song,
             in: activePlaybackQueue,
@@ -3381,7 +3403,6 @@ private final class MusicConnectionManager: ObservableObject {
         playbackStartVerificationTask?.cancel()
         playbackStartVerificationTask = nil
         pendingPlaybackStart = nil
-        let musicPlayer = MPMusicPlayerController.applicationMusicPlayer
         if musicPlayer.playbackState == .playing || musicPlayer.playbackState == .paused {
             musicPlayer.stop()
         }
@@ -3484,8 +3505,13 @@ private final class MusicConnectionManager: ObservableObject {
 
         if let mediaItem = song.mediaItem {
             let mediaItems = orderedQueue.compactMap(\.mediaItem)
-            player.setQueue(with: MPMediaItemCollection(items: mediaItems.isEmpty ? [mediaItem] : mediaItems))
-            player.nowPlayingItem = mediaItem
+            let queueItems = mediaItems.isEmpty ? [mediaItem] : mediaItems
+            let descriptor = MPMusicPlayerMediaItemQueueDescriptor(
+                itemCollection: MPMediaItemCollection(items: queueItems)
+            )
+            descriptor.startItem = mediaItem
+            queueItems.forEach { descriptor.setStartTime(0, for: $0) }
+            player.setQueue(with: descriptor)
             return
         }
 
@@ -3495,7 +3521,11 @@ private final class MusicConnectionManager: ObservableObject {
                       Self.isValidPlaybackStoreID(candidateStoreID) else { return nil }
                 return candidateStoreID
             }
-            player.setQueue(with: storeIDs.isEmpty ? [storeID] : storeIDs)
+            let queueStoreIDs = storeIDs.isEmpty ? [storeID] : storeIDs
+            let descriptor = MPMusicPlayerStoreQueueDescriptor(storeIDs: queueStoreIDs)
+            descriptor.startItemID = storeID
+            queueStoreIDs.forEach { descriptor.setStartTime(0, forItemWithStoreID: $0) }
+            player.setQueue(with: descriptor)
             return
         }
     }
@@ -4661,7 +4691,7 @@ private final class MusicConnectionManager: ObservableObject {
     private func clearPlaybackIfNeeded(disconnectedSources: Set<DemoSongSource>) {
         activePlaybackQueue.removeAll { disconnectedSources.contains($0.source) }
         guard let currentSong, disconnectedSources.contains(currentSong.source) else { return }
-        let player = MPMusicPlayerController.applicationMusicPlayer
+        let player = musicPlayer
         player.stop()
         stopPreviewPlayback(clearPlaybackState: true)
         self.currentSong = nil
@@ -7477,7 +7507,7 @@ private struct PlayerPillRhythmLights: View {
 
     private func currentPlaybackTime(fallbackTime: TimeInterval) -> TimeInterval {
         guard isPlaying else { return 0 }
-        let playbackTime = MPMusicPlayerController.applicationMusicPlayer.currentPlaybackTime
+        let playbackTime = MPMusicPlayerController.systemMusicPlayer.currentPlaybackTime
         return playbackTime > 0 ? playbackTime : fallbackTime
     }
 
