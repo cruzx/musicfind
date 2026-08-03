@@ -2609,12 +2609,13 @@ private final class MusicConnectionManager: ObservableObject {
     func loadAppleMusicLibrary() {
         MPMediaLibrary.default().beginGeneratingLibraryChangeNotifications()
 
-        applePlaylists = appleMusicPlaylists()
-        let items = mediaItemsFromLibrary()
+        let playlistCollections = appleMusicPlaylistCollections()
+        applePlaylists = appleMusicPlaylists(from: playlistCollections)
+        let items = mediaItemsFromLibrary(playlistCollections: playlistCollections)
         let palettes = DemoSong.library.map(\.colors)
         suppressSongCacheRebuild = true
         librarySongs = items.enumerated().map { index, item in
-            let shouldLoadArtworkImmediately = index < 64
+            let shouldLoadArtworkImmediately = index < 16
             let artworkImage = shouldLoadArtworkImmediately
                 ? item.artwork?.image(at: CGSize(width: 220, height: 220))
                 : nil
@@ -2634,9 +2635,13 @@ private final class MusicConnectionManager: ObservableObject {
                 source: .library
             )
         }
+        let representativeSongsByAlbumID = librarySongs.reduce(into: [MPMediaEntityPersistentID: DemoSong]()) { result, song in
+            guard let albumID = song.albumPersistentID, result[albumID] == nil else { return }
+            result[albumID] = song
+        }
         libraryAlbumCards = makeAlbumCards(
             from: appleMusicAlbumCollections(),
-            fallbackSongs: librarySongs,
+            representativeSongsByAlbumID: representativeSongsByAlbumID,
             palettes: palettes
         )
         suppressSongCacheRebuild = false
@@ -2715,14 +2720,14 @@ private final class MusicConnectionManager: ObservableObject {
         }
     }
 
-    private func mediaItemsFromLibrary() -> [MPMediaItem] {
+    private func mediaItemsFromLibrary(playlistCollections: [MPMediaItemCollection]) -> [MPMediaItem] {
         let queryItems: [MPMediaItem]
         if selectedApplePlaylistID == MusicPlaylistOption.allID {
             let libraryItems = MPMediaQuery.songs().items ?? []
-            let playlistItems = appleMusicPlaylistCollections().flatMap(\.items)
+            let playlistItems = playlistCollections.flatMap(\.items)
             queryItems = libraryItems + playlistItems
         } else {
-            queryItems = appleMusicPlaylistCollections()
+            queryItems = playlistCollections
                 .first(where: { playlistID(for: $0) == selectedApplePlaylistID })?
                 .items ?? []
         }
@@ -2745,7 +2750,7 @@ private final class MusicConnectionManager: ObservableObject {
 
     private func makeAlbumCards(
         from collections: [MPMediaItemCollection],
-        fallbackSongs: [DemoSong],
+        representativeSongsByAlbumID: [MPMediaEntityPersistentID: DemoSong],
         palettes: [[Color]]
     ) -> [DemoSong] {
         var seenAlbumIDs = Set<MPMediaEntityPersistentID>()
@@ -2756,7 +2761,7 @@ private final class MusicConnectionManager: ObservableObject {
             guard albumItems.count >= 2, let albumItem = albumItems.first else { return nil }
             let albumID = albumItem.albumPersistentID
             guard albumID != 0, seenAlbumIDs.insert(albumID).inserted else { return nil }
-            let representative = fallbackSongs.first { $0.albumPersistentID == albumID }
+            let representative = representativeSongsByAlbumID[albumID]
             let albumTitle = albumItem.albumTitle?.trimmingCharacters(in: .whitespacesAndNewlines)
             guard let albumTitle, albumTitle.isEmpty == false else { return nil }
             let artist = albumItem.albumArtist ?? albumItem.artist ?? representative?.artist ?? "Unknown Artist"
@@ -2785,8 +2790,8 @@ private final class MusicConnectionManager: ObservableObject {
         }
     }
 
-    private func appleMusicPlaylists() -> [MusicPlaylistOption] {
-        appleMusicPlaylistCollections().compactMap { collection in
+    private func appleMusicPlaylists(from collections: [MPMediaItemCollection]) -> [MusicPlaylistOption] {
+        collections.compactMap { collection in
             let id = playlistID(for: collection)
             guard id.isEmpty == false else { return nil }
             let name = (collection as? MPMediaPlaylist)?.name
@@ -3647,31 +3652,18 @@ private final class MusicConnectionManager: ObservableObject {
     }
 
     private func weightedTimeShuffle(_ songs: [(song: DemoSong, score: Double)]) -> [DemoSong] {
-        var remaining = songs
-        var result: [DemoSong] = []
+        guard songs.count > 1 else { return songs.map(\.song) }
+        let bestScore = songs.map(\.score).max() ?? 0
 
-        while remaining.isEmpty == false {
-            let bestScore = remaining.map(\.score).max() ?? 0
-            let weights = remaining.map { item in
+        return songs
+            .map { item -> (song: DemoSong, rank: Double) in
                 let normalizedScore = item.score - bestScore
-                return max(0.18, exp(normalizedScore * 0.92)) + Double.random(in: 0...0.22)
+                let weight = max(0.18, exp(normalizedScore * 0.92)) + Double.random(in: 0...0.22)
+                let randomUnit = max(Double.random(in: 0..<1), Double.leastNonzeroMagnitude)
+                return (item.song, -log(randomUnit) / weight)
             }
-            let totalWeight = weights.reduce(0, +)
-            var pick = Double.random(in: 0..<max(totalWeight, 0.001))
-            var selectedIndex = remaining.startIndex
-
-            for index in remaining.indices {
-                pick -= weights[index]
-                if pick <= 0 {
-                    selectedIndex = index
-                    break
-                }
-            }
-
-            result.append(remaining.remove(at: selectedIndex).song)
-        }
-
-        return result
+            .sorted { $0.rank < $1.rank }
+            .map(\.song)
     }
 
     private func adjacentSong(to song: DemoSong, step: Int, in queue: [DemoSong]) -> DemoSong? {
