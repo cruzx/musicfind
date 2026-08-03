@@ -2206,6 +2206,13 @@ private struct ArtistPlaybackOption: Identifiable {
 
 
 private final class MusicConnectionManager: ObservableObject {
+    private struct PendingPlaybackStart {
+        let requestID: Int
+        let song: DemoSong
+        var isPrepared = false
+        var didStart = false
+    }
+
     @Published var isConnectingAppleMusic = false
     @Published var librarySongs: [DemoSong] = [] {
         didSet { rebuildSongCachesIfNeeded() }
@@ -2242,6 +2249,8 @@ private final class MusicConnectionManager: ObservableObject {
 
     private var playbackLoadingTask: Task<Void, Never>?
     private var queuedPlaybackTask: Task<Void, Never>?
+    private var playbackStartVerificationTask: Task<Void, Never>?
+    private var pendingPlaybackStart: PendingPlaybackStart?
     private var playbackPrefetchTask: Task<Void, Never>?
     private var homeFeedTask: Task<Void, Never>?
     private var delayedHomeFeedRefreshTask: Task<Void, Never>?
@@ -2288,8 +2297,18 @@ private final class MusicConnectionManager: ObservableObject {
         let libraryItems = homeLibraryItems
         let recommendationSongs = aiRecommendationsEnabled ? recommendedSongs : []
         let rotatedLibrarySongs = rotatedHomeSongs(libraryItems, salt: homeFeedSessionSalt * 0.73 + 19)
+        let rotatedAlbumCards = rotatedHomeSongs(libraryAlbumCards, salt: homeFeedSessionSalt * 0.91 + 37)
+        let frequentSongs = Array(frequentlyPlayedLibrarySongs.prefix(32))
+        let personalLibraryItems = interleavedPersonalLibraryItems(
+            albumCards: Array(rotatedAlbumCards.prefix(24)),
+            frequentSongs: frequentSongs
+        )
+        let prioritizedHomeFeed = homeFeedSongsWithPersonalLibrary(
+            homeFeedSongs,
+            personalLibraryItems: personalLibraryItems
+        )
         let connectedSongs = uniqueDiscoverySongs(
-            from: homeFeedSongs
+            from: prioritizedHomeFeed
                 + interleavedDiscoverySongs(librarySongs: rotatedLibrarySongs, recommendedSongs: recommendationSongs)
                 + discoveryExtraSongs
         )
@@ -2314,6 +2333,24 @@ private final class MusicConnectionManager: ObservableObject {
             return collapsedAlbumIDs.contains(albumID) == false
         }
         return libraryAlbumCards + looseSongs
+    }
+
+    private var frequentlyPlayedLibrarySongs: [DemoSong] {
+        librarySongs
+            .filter { song in
+                guard let item = song.mediaItem else { return false }
+                return item.playCount > 0 || item.lastPlayedDate != nil
+            }
+            .sorted { frequentPlaybackScore(for: $0) > frequentPlaybackScore(for: $1) }
+    }
+
+    private func frequentPlaybackScore(for song: DemoSong) -> Double {
+        guard let item = song.mediaItem else { return 0 }
+        let playScore = Double(min(item.playCount, 500)) * 12
+        guard let lastPlayedDate = item.lastPlayedDate else { return playScore }
+        let daysAgo = max(0, Date().timeIntervalSince(lastPlayedDate) / 86_400)
+        let recencyScore = max(0, 365 - daysAgo) * 2
+        return playScore + recencyScore
     }
 
     var artistPlaybackOptions: [ArtistPlaybackOption] {
@@ -2396,6 +2433,48 @@ private final class MusicConnectionManager: ObservableObject {
         let day = Calendar.current.ordinality(of: .day, in: .era, for: Date()) ?? 0
         let offset = abs(Int(sin(Double(day) * 13.37 + salt) * 10_000)) % songs.count
         return Array(songs[offset...]) + Array(songs[..<offset])
+    }
+
+    private func interleavedPersonalLibraryItems(
+        albumCards: [DemoSong],
+        frequentSongs: [DemoSong]
+    ) -> [DemoSong] {
+        var items: [DemoSong] = []
+        let itemCount = max(albumCards.count, frequentSongs.count)
+        for index in 0..<itemCount {
+            if albumCards.indices.contains(index) {
+                items.append(albumCards[index])
+            }
+            if frequentSongs.indices.contains(index) {
+                items.append(frequentSongs[index])
+            }
+        }
+        return items
+    }
+
+    private func homeFeedSongsWithPersonalLibrary(
+        _ feedSongs: [DemoSong],
+        personalLibraryItems: [DemoSong]
+    ) -> [DemoSong] {
+        guard personalLibraryItems.isEmpty == false else { return feedSongs }
+        guard feedSongs.isEmpty == false else { return personalLibraryItems }
+
+        var mixedSongs: [DemoSong] = []
+        mixedSongs.reserveCapacity(feedSongs.count + personalLibraryItems.count)
+        var personalItemIndex = 0
+
+        for (feedIndex, song) in feedSongs.enumerated() {
+            if feedIndex.isMultiple(of: 3), personalLibraryItems.indices.contains(personalItemIndex) {
+                mixedSongs.append(personalLibraryItems[personalItemIndex])
+                personalItemIndex += 1
+            }
+            mixedSongs.append(song)
+        }
+
+        if personalLibraryItems.indices.contains(personalItemIndex) {
+            mixedSongs.append(contentsOf: personalLibraryItems[personalItemIndex...])
+        }
+        return mixedSongs
     }
 
     var applePlaylistOptions: [MusicPlaylistOption] {
@@ -2544,7 +2623,11 @@ private final class MusicConnectionManager: ObservableObject {
                 source: .library
             )
         }
-        libraryAlbumCards = makeAlbumCards(from: librarySongs, palettes: palettes)
+        libraryAlbumCards = makeAlbumCards(
+            from: appleMusicAlbumCollections(),
+            fallbackSongs: librarySongs,
+            palettes: palettes
+        )
         suppressSongCacheRebuild = false
         rebuildSongCaches()
         message = librarySongs.isEmpty
@@ -2649,33 +2732,40 @@ private final class MusicConnectionManager: ObservableObject {
         }
     }
 
-    private func makeAlbumCards(from songs: [DemoSong], palettes: [[Color]]) -> [DemoSong] {
-        Dictionary(grouping: songs.compactMap { song -> (MPMediaEntityPersistentID, DemoSong)? in
-            guard let albumID = song.albumPersistentID else { return nil }
-            return (albumID, song)
-        }, by: { $0.0 })
-        .compactMap { albumID, entries -> DemoSong? in
-            let albumSongs = entries.map(\.1)
-            guard albumSongs.count >= 2, let representative = albumSongs.first else { return nil }
-            let albumTitle = representative.mediaItem?.albumTitle?.trimmingCharacters(in: .whitespacesAndNewlines)
+    private func makeAlbumCards(
+        from collections: [MPMediaItemCollection],
+        fallbackSongs: [DemoSong],
+        palettes: [[Color]]
+    ) -> [DemoSong] {
+        var seenAlbumIDs = Set<MPMediaEntityPersistentID>()
+        return collections.compactMap { collection -> DemoSong? in
+            let albumItems = collection.items.filter { item in
+                item.mediaType.contains(.music) && item.title?.isEmpty == false
+            }
+            guard albumItems.count >= 2, let albumItem = albumItems.first else { return nil }
+            let albumID = albumItem.albumPersistentID
+            guard albumID != 0, seenAlbumIDs.insert(albumID).inserted else { return nil }
+            let representative = fallbackSongs.first { $0.albumPersistentID == albumID }
+            let albumTitle = albumItem.albumTitle?.trimmingCharacters(in: .whitespacesAndNewlines)
             guard let albumTitle, albumTitle.isEmpty == false else { return nil }
-            let artist = representative.mediaItem?.albumArtist ?? representative.artist
-            let palette = representative.colors.isEmpty
+            let artist = albumItem.albumArtist ?? albumItem.artist ?? representative?.artist ?? "Unknown Artist"
+            let representativeColors = representative?.colors ?? []
+            let palette = representativeColors.isEmpty
                 ? palettes[Int(albumID % UInt64(palettes.count))]
-                : representative.colors
+                : representativeColors
             let stableID = 2_000_000 + Int(albumID % 700_000)
             return DemoSong(
                 id: stableID,
                 title: albumTitle,
                 artist: artist,
                 colors: palette,
-                mediaItem: representative.mediaItem,
-                storeID: representative.storeID,
+                mediaItem: representative?.mediaItem ?? albumItem,
+                storeID: representative?.storeID ?? albumItem.safePlaybackStoreID,
                 albumPersistentID: albumID,
-                albumTrackCount: albumSongs.count,
-                artworkImage: representative.artworkImage,
-                backdropImage: representative.backdropImage,
-                magicColor: representative.magicColor,
+                albumTrackCount: albumItems.count,
+                artworkImage: representative?.artworkImage,
+                backdropImage: representative?.backdropImage,
+                magicColor: representative?.magicColor,
                 source: .album
             )
         }
@@ -2697,6 +2787,10 @@ private final class MusicConnectionManager: ObservableObject {
 
     private func appleMusicPlaylistCollections() -> [MPMediaItemCollection] {
         MPMediaQuery.playlists().collections ?? []
+    }
+
+    private func appleMusicAlbumCollections() -> [MPMediaItemCollection] {
+        MPMediaQuery.albums().collections ?? []
     }
 
     private func playlistID(for collection: MPMediaItemCollection) -> String {
@@ -2831,11 +2925,14 @@ private final class MusicConnectionManager: ObservableObject {
         }
         beginPlaybackLoading()
         queuedPlaybackTask?.cancel()
+        playbackStartVerificationTask?.cancel()
+        playbackStartVerificationTask = nil
         autoAdvanceTask?.cancel()
         autoAdvanceTask = nil
         playbackPrefetchTask?.cancel()
         playbackRequestID &+= 1
         let requestID = playbackRequestID
+        pendingPlaybackStart = PendingPlaybackStart(requestID: requestID, song: song)
         let queueSnapshot = compactPlaybackQueueSnapshot(startingWith: song, in: queueSongs, randomizeTail: randomizeQueue)
         activePlaybackQueue = queueSnapshot
         shouldAutoAdvancePlayback = true
@@ -3026,6 +3123,8 @@ private final class MusicConnectionManager: ObservableObject {
             return
         }
 
+        startPendingPlaybackIfReady(on: player)
+
         if let matchedSong = song(matching: item) {
             currentSong = matchedSong
             playingSongID = matchedSong.id
@@ -3138,8 +3237,8 @@ private final class MusicConnectionManager: ObservableObject {
 
     private func setPlaybackQueue(on player: MPMusicPlayerController, startingWith song: DemoSong, in queueSongs: [DemoSong]?) {
         stopPreviewPlayback(clearPlaybackState: false)
-        if player.playbackState == .playing {
-            player.pause()
+        if player.playbackState != .stopped {
+            player.stop()
         }
         prepareContinuousQueue(on: player, startingWith: song, in: queueSongs)
     }
@@ -3157,6 +3256,7 @@ private final class MusicConnectionManager: ObservableObject {
             endPlaybackLoading(requestID: requestID)
             isPlaying = false
             playingSongID = nil
+            pendingPlaybackStart = nil
             message = "这首歌暂时没有可播放预览。"
             return
         }
@@ -3169,28 +3269,100 @@ private final class MusicConnectionManager: ObservableObject {
                         return
                     }
                     self.endPlaybackLoading(requestID: requestID)
+                    self.pendingPlaybackStart = nil
                     self.message = "加载这首歌有点慢：\(error.localizedDescription)"
                     return
                 }
-                player.play()
-                self.schedulePlaybackPrefetch(startingWith: song, in: queueSongs, requestID: requestID)
-                self.endPlaybackLoading(requestID: requestID)
-                self.message = "正在播放：\(song.title)"
-                self.previewPlaybackTask?.cancel()
-                self.previewPlaybackTask = Task { @MainActor in
-                    try? await Task.sleep(for: .milliseconds(1_500))
-                    guard !Task.isCancelled,
-                          self.playbackRequestID == requestID,
-                          self.playingSongID == song.id,
-                          self.previewSongID == nil,
-                          player.playbackState != .playing else { return }
-                    if self.startPreviewPlayback(for: song, in: queueSongs, requestID: requestID) == false {
-                        self.endPlaybackLoading(requestID: requestID)
-                        self.isPlaying = false
-                        self.playingSongID = nil
-                        self.message = "这首歌暂时没有可播放预览。"
-                    }
+                guard var pending = self.pendingPlaybackStart,
+                      pending.requestID == requestID else { return }
+                pending.isPrepared = true
+                self.pendingPlaybackStart = pending
+
+                if self.startPendingPlaybackIfReady(on: player) == false {
+                    self.schedulePendingPlaybackTimeout(
+                        on: player,
+                        song: song,
+                        queueSongs: queueSongs,
+                        requestID: requestID
+                    )
                 }
+            }
+        }
+    }
+
+    @discardableResult
+    private func startPendingPlaybackIfReady(on player: MPMusicPlayerController) -> Bool {
+        guard var pending = pendingPlaybackStart,
+              pending.requestID == playbackRequestID,
+              pending.isPrepared,
+              pending.didStart == false,
+              isPlayerCurrentlyOn(pending.song, player: player) else {
+            return false
+        }
+
+        pending.didStart = true
+        pendingPlaybackStart = pending
+        previewPlaybackTask?.cancel()
+        player.currentPlaybackTime = 0
+        player.play()
+        player.currentPlaybackTime = 0
+        schedulePlaybackPrefetch(
+            startingWith: pending.song,
+            in: activePlaybackQueue,
+            requestID: pending.requestID
+        )
+        endPlaybackLoading(requestID: pending.requestID)
+        message = "正在播放：\(pending.song.title)"
+        verifyPlaybackStartedAtBeginning(on: player, pending: pending)
+        return true
+    }
+
+    private func verifyPlaybackStartedAtBeginning(
+        on player: MPMusicPlayerController,
+        pending: PendingPlaybackStart
+    ) {
+        playbackStartVerificationTask?.cancel()
+        playbackStartVerificationTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(320))
+            guard !Task.isCancelled,
+                  let self,
+                  self.playbackRequestID == pending.requestID,
+                  self.isPlayerCurrentlyOn(pending.song, player: player) else { return }
+
+            // The system player can restore a cloud item's old bookmark after play().
+            // Correct it once, after the target item is confirmed, instead of seeking the previous item.
+            if player.currentPlaybackTime > 1.2 {
+                player.currentPlaybackTime = 0
+            }
+            if self.pendingPlaybackStart?.requestID == pending.requestID {
+                self.pendingPlaybackStart = nil
+            }
+            self.playbackStartVerificationTask = nil
+        }
+    }
+
+    private func schedulePendingPlaybackTimeout(
+        on player: MPMusicPlayerController,
+        song: DemoSong,
+        queueSongs: [DemoSong]?,
+        requestID: Int
+    ) {
+        previewPlaybackTask?.cancel()
+        previewPlaybackTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(1_500))
+            guard !Task.isCancelled,
+                  let self,
+                  self.playbackRequestID == requestID,
+                  self.pendingPlaybackStart?.requestID == requestID else { return }
+            if self.startPendingPlaybackIfReady(on: player) {
+                return
+            }
+            self.pendingPlaybackStart = nil
+            if self.startPreviewPlayback(for: song, in: queueSongs, requestID: requestID) == false {
+                self.endPlaybackLoading(requestID: requestID)
+                self.isPlaying = false
+                self.playingSongID = nil
+                self.message = "这首歌暂时没有可播放预览。"
             }
         }
     }
@@ -3206,6 +3378,9 @@ private final class MusicConnectionManager: ObservableObject {
         }
 
         previewPlaybackTask?.cancel()
+        playbackStartVerificationTask?.cancel()
+        playbackStartVerificationTask = nil
+        pendingPlaybackStart = nil
         let musicPlayer = MPMusicPlayerController.applicationMusicPlayer
         if musicPlayer.playbackState == .playing || musicPlayer.playbackState == .paused {
             musicPlayer.stop()
@@ -3307,6 +3482,13 @@ private final class MusicConnectionManager: ObservableObject {
     ) {
         let orderedQueue = orderedPlaybackQueue(startingWith: song, in: queueSongs)
 
+        if let mediaItem = song.mediaItem {
+            let mediaItems = orderedQueue.compactMap(\.mediaItem)
+            player.setQueue(with: MPMediaItemCollection(items: mediaItems.isEmpty ? [mediaItem] : mediaItems))
+            player.nowPlayingItem = mediaItem
+            return
+        }
+
         if let storeID = song.storeID, Self.isValidPlaybackStoreID(storeID) {
             let storeIDs = orderedQueue.compactMap { candidate -> String? in
                 guard let candidateStoreID = candidate.storeID,
@@ -3315,12 +3497,6 @@ private final class MusicConnectionManager: ObservableObject {
             }
             player.setQueue(with: storeIDs.isEmpty ? [storeID] : storeIDs)
             return
-        }
-
-        if let mediaItem = song.mediaItem {
-            let mediaItems = orderedQueue.compactMap(\.mediaItem)
-            player.setQueue(with: MPMediaItemCollection(items: mediaItems.isEmpty ? [mediaItem] : mediaItems))
-            player.nowPlayingItem = mediaItem
         }
     }
 
@@ -3546,11 +3722,16 @@ private final class MusicConnectionManager: ObservableObject {
     }
 
     private func uniqueDiscoverySongs(from songs: [DemoSong]) -> [DemoSong] {
+        var seenAlbumIDs = Set<MPMediaEntityPersistentID>()
         var seenKeys = Set<String>()
         var seenStoreIDs = Set<String>()
         var seenMediaIDs = Set<MPMediaEntityPersistentID>()
         return songs.compactMap { song in
             guard song.isPlaceholder == false else { return song }
+            if song.isAlbumCard, let albumID = song.albumPersistentID {
+                guard seenAlbumIDs.insert(albumID).inserted else { return nil }
+                return song
+            }
             if let mediaItem = song.mediaItem {
                 guard seenMediaIDs.insert(mediaItem.persistentID).inserted else { return nil }
                 return song
