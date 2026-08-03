@@ -1650,6 +1650,7 @@ private struct InitialLibraryLoadingOverlay: View {
 private struct ProfilePage: View {
     @ObservedObject var connector: MusicConnectionManager
     @Binding var activeTab: AppTab
+    @State private var isPrivacyPolicyPresented = false
 
     var body: some View {
         GeometryReader { proxy in
@@ -1698,6 +1699,10 @@ private struct ProfilePage: View {
                         }
                     }
 
+                    PrivacySupportPanel {
+                        isPrivacyPolicyPresented = true
+                    }
+
                     if let message = connector.message {
                         Text(message)
                             .font(.system(size: 13, weight: .medium))
@@ -1714,12 +1719,16 @@ private struct ProfilePage: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .sheet(isPresented: $isPrivacyPolicyPresented) {
+            PrivacyPolicyView()
+        }
     }
 }
 
 private struct SettingsModalView: View {
     @ObservedObject var connector: MusicConnectionManager
     let onClose: () -> Void
+    @State private var isPrivacyPolicyPresented = false
 
     var body: some View {
         GeometryReader { proxy in
@@ -1780,6 +1789,10 @@ private struct SettingsModalView: View {
                         }
                     }
 
+                    PrivacySupportPanel {
+                        isPrivacyPolicyPresented = true
+                    }
+
                     if let message = connector.message {
                         Text(message)
                             .font(.system(size: 13, weight: .medium))
@@ -1804,6 +1817,9 @@ private struct SettingsModalView: View {
             }
             .liquidGlassSurface(cornerRadius: 34, isInteractive: false)
             .position(x: proxy.size.width / 2, y: proxy.size.height / 2)
+        }
+        .sheet(isPresented: $isPrivacyPolicyPresented) {
+            PrivacyPolicyView()
         }
     }
 }
@@ -2043,6 +2059,136 @@ private struct SourceSettingsPanel: View {
             .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         }
         .buttonStyle(.plain)
+    }
+}
+
+private struct PrivacySupportPanel: View {
+    let onShowPrivacyPolicy: () -> Void
+
+    private let supportURL = URL(string: "https://github.com/cruzx/musicfind/issues/new")!
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Button(action: onShowPrivacyPolicy) {
+                PrivacySupportLabel(title: "隐私政策", systemName: "hand.raised.fill")
+            }
+
+            Link(destination: supportURL) {
+                PrivacySupportLabel(title: "联系我们", systemName: "envelope.fill")
+            }
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct PrivacySupportLabel: View {
+    let title: String
+    let systemName: String
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: systemName)
+                .font(.system(size: 14, weight: .bold))
+                .foregroundStyle(.white.opacity(0.82))
+
+            Text(title)
+                .font(.system(size: 14, weight: .bold))
+                .foregroundStyle(.white.opacity(0.90))
+                .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: 46)
+        .background(.black.opacity(0.48))
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(.white.opacity(0.08), lineWidth: 1)
+        }
+    }
+}
+
+private struct PrivacyPolicyView: View {
+    @Environment(\.dismiss) private var dismiss
+
+    private let supportURL = URL(string: "https://github.com/cruzx/musicfind/issues/new")!
+
+    var body: some View {
+        NavigationStack {
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 24) {
+                    Text("生效日期：2026 年 8 月 3 日")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.50))
+
+                    policySection(
+                        title: "我们读取什么",
+                        text: "获得你的明确授权后，FlipMusic 会读取 Apple Music 资料库中的歌曲、歌单、专辑、播放次数和最近播放信息。"
+                    )
+
+                    policySection(
+                        title: "如何使用",
+                        text: "这些资料用于在 App 内展示音乐、生成个性化排序并控制 Apple Music 播放。我们不运营用户账号或后台数据库，不销售你的数据。"
+                    )
+
+                    policySection(
+                        title: "网络服务",
+                        text: "为补充专辑封面和音乐信息，App 可能会向 Apple 的 iTunes Search 服务发送歌曲名和歌手名。当你查看歌词时，App 还可能将歌曲名和歌手名发送给 LRCLIB 或 lyrics.ovh，用于返回当前歌曲的歌词。"
+                    )
+
+                    policySection(
+                        title: "本地存储与删除",
+                        text: "音乐资料和使用偏好主要保存在你的设备上。你可在设置中断开 Apple Music；删除 App 可清除 FlipMusic 在设备上保存的本地设置。"
+                    )
+
+                    policySection(
+                        title: "跟踪与广告",
+                        text: "FlipMusic 不包含广告 SDK，不使用跨 App 跟踪，不会将你的资料用于定向广告。"
+                    )
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("联系我们")
+                            .font(.system(size: 18, weight: .bold))
+                            .foregroundStyle(.white)
+
+                        Link("打开 FlipMusic 支持页", destination: supportURL)
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(Color(red: 0.30, green: 0.85, blue: 0.55))
+                    }
+                }
+                .padding(.horizontal, 22)
+                .padding(.top, 18)
+                .padding(.bottom, 36)
+            }
+            .background(Color.black.ignoresSafeArea())
+            .navigationTitle("FlipMusic 隐私政策")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        dismiss()
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 20, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.72))
+                    }
+                    .accessibilityLabel("关闭")
+                }
+            }
+            .preferredColorScheme(.dark)
+        }
+    }
+
+    private func policySection(title: String, text: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.system(size: 18, weight: .bold))
+                .foregroundStyle(.white)
+
+            Text(text)
+                .font(.system(size: 15, weight: .regular))
+                .foregroundStyle(.white.opacity(0.68))
+                .lineSpacing(5)
+        }
     }
 }
 
