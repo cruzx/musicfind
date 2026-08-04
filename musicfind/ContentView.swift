@@ -2351,6 +2351,7 @@ private struct ArtistPlaybackOption: Identifiable {
 }
 
 
+@MainActor
 private final class MusicConnectionManager: ObservableObject {
     private struct PendingPlaybackStart {
         let requestID: Int
@@ -2407,7 +2408,8 @@ private final class MusicConnectionManager: ObservableObject {
     private var previewEndObserver: NSObjectProtocol?
     private var previewPlaybackTask: Task<Void, Never>?
     private var previewSongID: Int?
-    private var playbackRequestID = 0
+    private var playbackCoreState = PlaybackCoreState()
+    private var playbackRequestID: Int { playbackCoreState.requestID }
     @Published private(set) var activePlaybackQueue: [DemoSong] = []
     private var autoAdvanceTask: Task<Void, Never>?
     private var shouldAutoAdvancePlayback = false
@@ -3051,8 +3053,7 @@ private final class MusicConnectionManager: ObservableObject {
         autoAdvanceTask?.cancel()
         autoAdvanceTask = nil
         playbackPrefetchTask?.cancel()
-        playbackRequestID &+= 1
-        let requestID = playbackRequestID
+        let requestID = playbackCoreState.select(songID: song.id)
         pendingPlaybackStart = PendingPlaybackStart(requestID: requestID, song: song)
         let queueSnapshot = compactPlaybackQueueSnapshot(startingWith: song, in: queueSongs, randomizeTail: randomizeQueue)
         activePlaybackQueue = queueSnapshot
@@ -3105,6 +3106,7 @@ private final class MusicConnectionManager: ObservableObject {
         }
         if previewSongID == song.id, let previewAudioPlayer {
             if previewAudioPlayer.timeControlStatus == .playing {
+                playbackCoreState.pause(songID: song.id, progress: currentPlaybackProgress)
                 previewAudioPlayer.pause()
                 autoAdvanceTask?.cancel()
                 autoAdvanceTask = nil
@@ -3115,6 +3117,7 @@ private final class MusicConnectionManager: ObservableObject {
                 endPlaybackLoading()
                 message = "已暂停：\(song.title)"
             } else {
+                playbackCoreState.resume(songID: song.id)
                 try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [])
                 try? AVAudioSession.sharedInstance().setActive(true)
                 previewAudioPlayer.play()
@@ -3129,6 +3132,7 @@ private final class MusicConnectionManager: ObservableObject {
         }
         let player = musicPlayer
         if player.playbackState == .playing, isPlayerCurrentlyOn(song, player: player) {
+            playbackCoreState.pause(songID: song.id, progress: currentPlaybackProgress)
             player.pause()
             autoAdvanceTask?.cancel()
             autoAdvanceTask = nil
@@ -3139,6 +3143,7 @@ private final class MusicConnectionManager: ObservableObject {
             endPlaybackLoading()
             message = "已暂停：\(song.title)"
         } else if isPlayerCurrentlyOn(song, player: player) {
+            playbackCoreState.resume(songID: song.id)
             player.play()
             shouldAutoAdvancePlayback = true
             playingSongID = song.id
@@ -3165,8 +3170,8 @@ private final class MusicConnectionManager: ObservableObject {
                 forName: .MPMusicPlayerControllerNowPlayingItemDidChange,
                 object: player,
                 queue: .main
-            ) { [weak self] _ in
-                Task { @MainActor in
+            ) { @Sendable [weak self] _ in
+                Task { @MainActor [weak self] in
                     self?.syncPlaybackState()
                 }
             },
@@ -3174,8 +3179,8 @@ private final class MusicConnectionManager: ObservableObject {
                 forName: .MPMusicPlayerControllerPlaybackStateDidChange,
                 object: player,
                 queue: .main
-            ) { [weak self] _ in
-                Task { @MainActor in
+            ) { @Sendable [weak self] _ in
+                Task { @MainActor [weak self] in
                     self?.syncPlaybackState()
                 }
             }
@@ -3197,11 +3202,30 @@ private final class MusicConnectionManager: ObservableObject {
         case .active:
             startPlaybackSync()
             syncPlaybackState()
+            _ = playbackCoreState.returnToForeground(
+                observedSongID: playingSongID,
+                progress: currentPlaybackProgress,
+                isPlaying: isPlaying
+            )
         case .inactive, .background:
             syncPlaybackState()
+            playbackCoreState.enterBackground(
+                songID: playingSongID,
+                progress: currentPlaybackProgress,
+                isPlaying: isPlaying
+            )
         @unknown default:
             break
         }
+    }
+
+    private var currentPlaybackProgress: TimeInterval {
+        if let previewAudioPlayer {
+            let seconds = previewAudioPlayer.currentTime().seconds
+            return seconds.isFinite ? max(0, seconds) : 0
+        }
+        let seconds = musicPlayer.currentPlaybackTime
+        return seconds.isFinite ? max(0, seconds) : 0
     }
 
     private func syncPlaybackState() {
@@ -3357,8 +3381,8 @@ private final class MusicConnectionManager: ObservableObject {
             return
         }
 
-        player.prepareToPlay { [weak self] error in
-            Task { @MainActor in
+        player.prepareToPlay { error in
+            Task { @MainActor [weak self] in
                 guard let self, self.playingSongID == song.id, self.playbackRequestID == requestID else { return }
                 if let error {
                     if self.startPreviewPlayback(for: song, in: queueSongs, requestID: requestID) {
@@ -3374,9 +3398,10 @@ private final class MusicConnectionManager: ObservableObject {
                 pending.isPrepared = true
                 self.pendingPlaybackStart = pending
 
-                if self.startPendingPlaybackIfReady(on: player) == false {
+                let activePlayer = self.musicPlayer
+                if self.startPendingPlaybackIfReady(on: activePlayer) == false {
                     self.schedulePendingPlaybackTimeout(
-                        on: player,
+                        on: activePlayer,
                         song: song,
                         queueSongs: queueSongs,
                         requestID: requestID
@@ -3398,6 +3423,7 @@ private final class MusicConnectionManager: ObservableObject {
 
         pending.didStart = true
         pendingPlaybackStart = pending
+        playbackCoreState.didStart(songID: pending.song.id)
         previewPlaybackTask?.cancel()
         player.skipToBeginning()
         player.play()
@@ -3499,8 +3525,8 @@ private final class MusicConnectionManager: ObservableObject {
             forName: .AVPlayerItemDidPlayToEndTime,
             object: playerItem,
             queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in
+        ) { @Sendable [weak self] _ in
+            Task { @MainActor [weak self] in
                 self?.handlePreviewPlaybackEnded(songID: song.id)
             }
         }
@@ -4797,10 +4823,10 @@ private struct BadgePhysicsPanel: View {
             .onDisappear {
                 motion.stop()
             }
-            .onChange(of: proxy.size) { newSize in
+            .onChange(of: proxy.size) { _, newSize in
                 resetBadges(in: newSize)
             }
-            .onChange(of: panelSongs.map(\.id)) { _ in
+            .onChange(of: panelSongs.map(\.id)) { _, _ in
                 resetBadges(in: proxy.size, force: true)
             }
             .onReceive(frameRate) { _ in
@@ -6199,50 +6225,32 @@ private final class PlayerArtworkWarmupCache: ObservableObject {
     }
 
     func preload(songs: [DemoSong]) {
-        let targets = songs.filter { song in
+        let targets = songs.compactMap { song -> (id: Int, image: UIImage)? in
             let hasLocalArtwork = song.artworkImage != nil || song.mediaItem?.artwork != nil
-            guard hasLocalArtwork else { return false }
-            return artworkCache.object(forKey: NSNumber(value: song.id)) == nil &&
-                warmingIDs.contains(song.id) == false
+            guard hasLocalArtwork,
+                  artworkCache.object(forKey: NSNumber(value: song.id)) == nil,
+                  warmingIDs.contains(song.id) == false,
+                  let image = song.artworkImage
+                    ?? song.mediaItem?.artwork?.image(at: CGSize(width: 320, height: 320)) else { return nil }
+            return (song.id, image)
         }
         guard targets.isEmpty == false else { return }
         targets.forEach { warmingIDs.insert($0.id) }
 
-        Task.detached(priority: .utility) { [weak self] in
+        Task(priority: .utility) { @MainActor [weak self, targets] in
+            guard let self else { return }
             let batchSize = 12
             for batchStart in stride(from: 0, to: targets.count, by: batchSize) {
                 let batch = Array(targets[batchStart..<min(batchStart + batchSize, targets.count)])
-                let preparedImages = await withTaskGroup(of: (Int, UIImage?).self) { group in
-                    for song in batch {
-                        group.addTask {
-                            var image = song.artworkImage
-                            if image == nil {
-                                image = song.mediaItem?.artwork?.image(at: CGSize(width: 320, height: 320))
-                            }
-                            return (song.id, await image?.byPreparingForDisplay())
-                        }
+                for target in batch {
+                    guard Task.isCancelled == false else { break }
+                    if let image = await target.image.byPreparingForDisplay() {
+                        artworkCache.setObject(image, forKey: NSNumber(value: target.id))
                     }
-
-                    var results: [(Int, UIImage?)] = []
-                    for await result in group {
-                        results.append(result)
-                    }
-                    return results
                 }
-
-                await MainActor.run {
-                    preparedImages.forEach { id, image in
-                        if let image {
-                            self?.artworkCache.setObject(image, forKey: NSNumber(value: id))
-                        }
-                    }
-                    self?.revision &+= 1
-                }
+                revision &+= 1
             }
-
-            await MainActor.run {
-                targets.forEach { self?.warmingIDs.remove($0.id) }
-            }
+            targets.forEach { self.warmingIDs.remove($0.id) }
         }
     }
 }
