@@ -292,9 +292,6 @@ struct ContentView: View {
         .onReceive(musicConnector.$currentSong.compactMap { $0 }) { song in
             guard song.id != nowPlaying.id else { return }
             nowPlaying = song
-            if isPlayerCardVisible {
-                musicConnector.loadLyricsIfNeeded(for: song)
-            }
         }
         .onChange(of: activeTab) { _, newValue in
             if newValue == .home {
@@ -454,7 +451,6 @@ struct ContentView: View {
         isPlayerCardContentVisible = false
         isPlayerCardDismissing = false
         isPlayerCardVisible = true
-        musicConnector.loadLyricsIfNeeded(for: playerDisplaySong)
         ensureHomeHasEnoughSongsIfNeeded()
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) {
@@ -2116,7 +2112,7 @@ private struct PrivacyPolicyView: View {
         NavigationStack {
             ScrollView(showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 24) {
-                    Text("生效日期：2026 年 8 月 3 日")
+                    Text("生效日期：2026 年 8 月 4 日")
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(.white.opacity(0.50))
 
@@ -2132,7 +2128,7 @@ private struct PrivacyPolicyView: View {
 
                     policySection(
                         title: "网络服务",
-                        text: "为补充专辑封面和音乐信息，App 可能会向 Apple 的 iTunes Search 服务发送歌曲名和歌手名。当你查看歌词时，App 还可能将歌曲名和歌手名发送给 LRCLIB 或 lyrics.ovh，用于返回当前歌曲的歌词。"
+                        text: "为补充专辑封面和音乐信息，App 可能会向 Apple 的 iTunes Search 服务发送歌曲名和歌手名。歌词只会从 Apple Music 媒体条目在设备内读取，不会发送给外部歌词服务。"
                     )
 
                     policySection(
@@ -2390,9 +2386,6 @@ private final class MusicConnectionManager: ObservableObject {
     @Published var showPlaybackLoadingToast = false
     @Published private(set) var songCacheRevision = 0
     @Published var moodPreference = MusicMoodPreference.load()
-    @Published private var fetchedLyricsByKey: [String: String] = [:]
-    @Published private var loadingLyricKeys: Set<String> = []
-
     @AppStorage("appleMusicConnected") private var appleMusicConnected = false
     @AppStorage("selectedApplePlaylistID") var selectedApplePlaylistID = MusicPlaylistOption.allID
     @AppStorage("aiRecommendationsEnabled") var aiRecommendationsEnabled = true
@@ -2991,45 +2984,11 @@ private final class MusicConnectionManager: ObservableObject {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private func lyricsCacheKey(for song: DemoSong) -> String {
-        normalizedSongKey(title: song.title, artist: song.artist)
-    }
-
     private static func extractLyrics(from item: MPMediaItem) -> String? {
         if let lyrics = item.value(forProperty: MPMediaItemPropertyLyrics) as? String {
             let trimmed = lyrics.trimmingCharacters(in: .whitespacesAndNewlines)
             return trimmed.isEmpty ? nil : trimmed
         }
-        return nil
-    }
-
-    private static func parseLyricsLines(from rawLyrics: String?) -> [String] {
-        guard let rawLyrics else { return [] }
-        return rawLyrics
-            .components(separatedBy: .newlines)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { line in
-                guard line.isEmpty == false else { return false }
-                guard line.hasPrefix("[") == false || line.hasSuffix("]") == false else { return false }
-                return true
-            }
-    }
-
-    private func fetchRemoteLyrics(for song: DemoSong) async -> String? {
-        if let lyrics = try? await LRCLibClient.lyrics(title: song.title, artist: song.artist) {
-            let trimmed = lyrics.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.isEmpty == false {
-                return trimmed
-            }
-        }
-
-        if let lyrics = try? await LyricsOVHClient.lyrics(title: song.title, artist: song.artist) {
-            let trimmed = lyrics.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.isEmpty == false {
-                return trimmed
-            }
-        }
-
         return nil
     }
 
@@ -3242,43 +3201,6 @@ private final class MusicConnectionManager: ObservableObject {
             syncPlaybackState()
         @unknown default:
             break
-        }
-    }
-
-    func lyricLines(for song: DemoSong) -> [String] {
-        let candidates = [
-            song.lyricsText,
-            currentSong?.id == song.id ? currentSong?.lyricsText : nil,
-            fetchedLyricsByKey[lyricsCacheKey(for: song)],
-            musicPlayer.nowPlayingItem.flatMap(Self.extractLyrics(from:))
-        ]
-
-        for candidate in candidates {
-            let parsed = Self.parseLyricsLines(from: candidate)
-            if parsed.isEmpty == false {
-                return parsed
-            }
-        }
-
-        return []
-    }
-
-    func isLoadingLyrics(for song: DemoSong) -> Bool {
-        loadingLyricKeys.contains(lyricsCacheKey(for: song))
-    }
-
-    func loadLyricsIfNeeded(for song: DemoSong) {
-        let key = lyricsCacheKey(for: song)
-        guard fetchedLyricsByKey[key] == nil else { return }
-        guard loadingLyricKeys.contains(key) == false else { return }
-        guard lyricLines(for: song).isEmpty else { return }
-
-        loadingLyricKeys.insert(key)
-        Task { @MainActor in
-            defer { loadingLyricKeys.remove(key) }
-            if let lyrics = await fetchRemoteLyrics(for: song) {
-                fetchedLyricsByKey[key] = lyrics
-            }
         }
     }
 
@@ -5159,182 +5081,6 @@ private final class ShakeMotionObserver: ObservableObject {
         lastShakeDate = now
         shakeCount += 1
         shakeEventID = UUID()
-    }
-}
-
-private struct LyricsOverlayView: View {
-    let song: DemoSong
-    let lyricLines: [String]
-    let isLyricsLoading: Bool
-    let isPlaying: Bool
-    let isContentVisible: Bool
-    let onClose: () -> Void
-    let onTogglePlayback: () -> Void
-
-    @State private var dragOffset: CGFloat = 0
-
-    var body: some View {
-        GeometryReader { proxy in
-            let safeTop = proxy.safeAreaInsets.top
-            let modalTopInset = safeTop + 60
-            let modalBottomInset = max(proxy.safeAreaInsets.bottom + 10, 18)
-
-            VStack {
-                VStack(spacing: 0) {
-                    Capsule()
-                        .fill(.white.opacity(0.34))
-                        .frame(width: 54, height: 5)
-                        .padding(.top, 12)
-                        .padding(.bottom, 26)
-                        .onTapGesture(perform: onClose)
-
-                    HStack(alignment: .center, spacing: 18) {
-                        overlayArtwork
-
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(song.title)
-                                .font(.system(size: 34, weight: .heavy))
-                                .foregroundStyle(.white)
-                                .lineLimit(2)
-                                .minimumScaleFactor(0.72)
-
-                            Text(song.artist)
-                                .font(.system(size: 18, weight: .medium))
-                                .foregroundStyle(.white.opacity(0.62))
-                                .lineLimit(1)
-                        }
-
-                        Spacer(minLength: 12)
-                    }
-                    .padding(.horizontal, 24)
-                    .padding(.top, 8)
-
-                    ScrollView(showsIndicators: false) {
-                        VStack(alignment: .leading, spacing: 28) {
-                            if isLyricsLoading {
-                                VStack(alignment: .leading, spacing: 14) {
-                                    Text("正在搜索这首歌的歌词")
-                                        .font(.system(size: 32, weight: .heavy))
-                                        .foregroundStyle(.white.opacity(0.94))
-
-                                    Text("先从 Apple Music 读，拿不到就自动去外部歌词源补。")
-                                        .font(.system(size: 17, weight: .medium))
-                                        .foregroundStyle(.white.opacity(0.54))
-                                        .fixedSize(horizontal: false, vertical: true)
-                                }
-                                .padding(.top, 12)
-                            } else if lyricLines.isEmpty {
-                                VStack(alignment: .leading, spacing: 14) {
-                                    Text("暂时没有读到这首歌的歌词")
-                                        .font(.system(size: 32, weight: .heavy))
-                                        .foregroundStyle(.white.opacity(0.94))
-
-                                    Text("Apple Music 和外部歌词源这次都没有匹配到，换一首歌或等我继续补更多来源。")
-                                        .font(.system(size: 17, weight: .medium))
-                                        .foregroundStyle(.white.opacity(0.54))
-                                        .fixedSize(horizontal: false, vertical: true)
-                                }
-                                .padding(.top, 12)
-                            } else {
-                                ForEach(Array(lyricLines.enumerated()), id: \.offset) { index, line in
-                                    Text(line)
-                                        .font(.system(size: index == 0 ? 34 : 29, weight: .heavy))
-                                        .foregroundStyle(.white.opacity(0.88))
-                                        .fixedSize(horizontal: false, vertical: true)
-                                }
-                            }
-                        }
-                        .padding(.horizontal, 24)
-                        .padding(.top, 66)
-                        .padding(.bottom, 140)
-                    }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                .background {
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 34, style: .continuous)
-                            .fill(
-                                LinearGradient(
-                                    colors: [
-                                        Color.white.opacity(0.22),
-                                        Color.white.opacity(0.15),
-                                        Color.white.opacity(0.10)
-                                    ],
-                                    startPoint: .top,
-                                    endPoint: .bottom
-                                )
-                            )
-
-                        if let backdropImage = song.backdropImage ?? song.artworkImage {
-                            Image(uiImage: backdropImage)
-                                .resizable()
-                                .aspectRatio(contentMode: .fill)
-                                .overlay(Color.black.opacity(0.72))
-                                .blur(radius: 30)
-                                .clipShape(RoundedRectangle(cornerRadius: 34, style: .continuous))
-                        }
-
-                        LinearGradient(
-                            colors: [
-                                .white.opacity(0.14),
-                                .black.opacity(0.08),
-                                song.magicColor.opacity(0.12)
-                            ],
-                            startPoint: .top,
-                            endPoint: .bottomTrailing
-                        )
-                        .clipShape(RoundedRectangle(cornerRadius: 34, style: .continuous))
-                    }
-                }
-                .clipShape(RoundedRectangle(cornerRadius: 34, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 34, style: .continuous)
-                        .stroke(.white.opacity(0.08), lineWidth: 1)
-                }
-                .shadow(color: .black.opacity(0.3), radius: 24, y: 10)
-                .padding(.top, modalTopInset)
-                .padding(.horizontal, 10)
-                .padding(.bottom, modalBottomInset)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-            .offset(y: dragOffset)
-            .opacity(isContentVisible ? 1 : 0)
-            .scaleEffect(isContentVisible ? 1 : 0.98, anchor: .top)
-            .gesture(
-                DragGesture(minimumDistance: 8)
-                    .onChanged { value in
-                        guard value.translation.height > 0 else { return }
-                        dragOffset = value.translation.height
-                    }
-                    .onEnded { value in
-                        let shouldClose = value.translation.height > 110 || value.predictedEndTranslation.height > 180
-                        if shouldClose {
-                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                            onClose()
-                        } else {
-                            withAnimation(.smooth(duration: 0.18, extraBounce: 0.0)) {
-                                dragOffset = 0
-                            }
-                        }
-                    }
-            )
-            .onChange(of: isContentVisible) { _, visible in
-                if visible == false {
-                    dragOffset = 0
-                }
-            }
-        }
-    }
-
-    private var overlayArtwork: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(LinearGradient(colors: song.colors, startPoint: .topLeading, endPoint: .bottomTrailing))
-
-            SongArtworkLayer(song: song)
-        }
-        .frame(width: 74, height: 74)
-        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 }
 
@@ -8109,81 +7855,6 @@ private enum AppleMusicRSSClient {
     }
 }
 
-private enum LRCLibClient {
-    static func lyrics(title: String, artist: String) async throws -> String? {
-        if let exactLyrics = try await getLyrics(title: title, artist: artist) {
-            return exactLyrics
-        }
-        return try await searchLyrics(title: title, artist: artist)
-    }
-
-    private static func getLyrics(title: String, artist: String) async throws -> String? {
-        var components = URLComponents(string: "https://lrclib.net/api/get")
-        components?.queryItems = [
-            URLQueryItem(name: "track_name", value: title),
-            URLQueryItem(name: "artist_name", value: artist)
-        ]
-        guard let url = components?.url else { return nil }
-
-        let (data, response) = try await URLSession.shared.data(from: url)
-        guard let httpResponse = response as? HTTPURLResponse, (200..<300).contains(httpResponse.statusCode) else {
-            return nil
-        }
-
-        let payload = try JSONDecoder().decode(LRCLibTrack.self, from: data)
-        return payload.plainLyrics ?? payload.syncedLyrics
-    }
-
-    private static func searchLyrics(title: String, artist: String) async throws -> String? {
-        var components = URLComponents(string: "https://lrclib.net/api/search")
-        components?.queryItems = [
-            URLQueryItem(name: "q", value: "\(artist) \(title)"),
-            URLQueryItem(name: "artist_name", value: artist),
-            URLQueryItem(name: "track_name", value: title)
-        ]
-        guard let url = components?.url else { return nil }
-
-        let (data, response) = try await URLSession.shared.data(from: url)
-        guard let httpResponse = response as? HTTPURLResponse, (200..<300).contains(httpResponse.statusCode) else {
-            return nil
-        }
-
-        let payload = try JSONDecoder().decode([LRCLibTrack].self, from: data)
-        let bestMatch = payload.first { candidate in
-            normalized(candidate.trackName) == normalized(title) &&
-            normalized(candidate.artistName) == normalized(artist)
-        } ?? payload.first
-
-        return bestMatch?.plainLyrics ?? bestMatch?.syncedLyrics
-    }
-
-    private static func normalized(_ text: String) -> String {
-        text
-            .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
-            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-}
-
-private enum LyricsOVHClient {
-    static func lyrics(title: String, artist: String) async throws -> String? {
-        let encodedArtist = artist.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed)
-        let encodedTitle = title.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed)
-        guard let encodedArtist, let encodedTitle,
-              let url = URL(string: "https://api.lyrics.ovh/v1/\(encodedArtist)/\(encodedTitle)") else {
-            return nil
-        }
-
-        let (data, response) = try await URLSession.shared.data(from: url)
-        guard let httpResponse = response as? HTTPURLResponse, (200..<300).contains(httpResponse.statusCode) else {
-            return nil
-        }
-
-        let payload = try JSONDecoder().decode(LyricsOVHResponse.self, from: data)
-        return payload.lyrics
-    }
-}
-
 private enum AppleMusicStorefront {
     static var current: String {
         Locale.current.region?.identifier.lowercased() ?? "cn"
@@ -8200,17 +7871,6 @@ private struct AppleMusicRSSResponse: Decodable {
 
 private struct AppleMusicRSSFeed: Decodable {
     let results: [ITunesTrack]
-}
-
-private struct LRCLibTrack: Decodable {
-    let trackName: String
-    let artistName: String
-    let plainLyrics: String?
-    let syncedLyrics: String?
-}
-
-private struct LyricsOVHResponse: Decodable {
-    let lyrics: String
 }
 
 private struct ITunesTrack: Decodable {
