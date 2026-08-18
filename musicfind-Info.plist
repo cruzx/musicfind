@@ -25,7 +25,7 @@
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 	<key>NSAppleMusicUsageDescription</key>
-	<string>用于读取你的 Apple Music 资料库、歌单、专辑和播放信息，在 App 内展示并播放你常听的音乐。</string>
+	<string>用于读取你的 Apple Music 资料库、歌单、专辑和播放信息，在 App 内展示、播放并按你的选择创建歌单。</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

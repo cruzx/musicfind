@@ -8,8 +8,11 @@
 import SwiftUI
 import UIKit
 import CoreMotion
+import CoreImage
+import CoreML
 import Combine
 import MediaPlayer
+import MusicKit
 import AVFoundation
 
 struct ContentView: View {
@@ -24,6 +27,7 @@ struct ContentView: View {
     @State private var isPlayerCardDismissing = false
     @State private var playerMorphProgress: CGFloat = 0
     @State private var playerPillFrame: CGRect = .zero
+    @State private var playerCardPlaybackSongs: [DemoSong] = []
     @State private var homeDriftAmount: CGFloat = 0
     @State private var homeSongs: [DemoSong] = []
     @State private var availableHomeSongs: [DemoSong] = []
@@ -91,6 +95,18 @@ struct ContentView: View {
     }
     private var nextPlayablePreviewSong: DemoSong? {
         musicConnector.queuedNeighbor(for: playerDisplaySong, step: 1, fallbackSongs: songs)
+    }
+    private var playerPlaybackSongs: [DemoSong] {
+        let activeQueue = uniquePlayerSongs(
+            from: musicConnector.activePlaybackQueue.filter { $0.isPlayable && !$0.isPlaceholder }
+        )
+        if activeQueue.contains(where: { $0.id == playerDisplaySong.id }) {
+            return activeQueue
+        }
+        return compactHomePlaybackSnapshot(startingWith: playerDisplaySong)
+    }
+    private var stablePlayerCardSongs: [DemoSong] {
+        playerCardPlaybackSongs.isEmpty ? playerPlaybackSongs : playerCardPlaybackSongs
     }
 
     var body: some View {
@@ -209,6 +225,44 @@ struct ContentView: View {
             .animation(.smooth(duration: 0.24, extraBounce: 0.0), value: isLandscape)
             .zIndex(6)
 
+            if isPlayerCardVisible {
+                ZStack {
+                    Color.black.opacity(0.42)
+                        .ignoresSafeArea()
+
+                    GeometryReader { cardProxy in
+                        let cardWidth = max(250, (cardProxy.size.width - 16) * 0.92)
+                        let cardHeight = max(460, (cardProxy.size.height - 80) * 0.82)
+                        let resolvedCardWidth = min(cardWidth, cardProxy.size.width - 12)
+                        let resolvedCardHeight = min(cardHeight + 60, cardProxy.size.height - 24)
+
+                        VStack(spacing: 0) {
+                            FluidPlayerOverlay(
+                                songs: stablePlayerCardSongs,
+                                nowPlaying: playerDisplaySong,
+                                isPlaying: musicConnector.isPlaying,
+                                isContentVisible: isPlayerCardContentVisible,
+                                onClose: hidePlayerCard,
+                                onSongChange: { song in
+                                    musicConnector.queuePlaybackPreservingOrder(
+                                        for: song,
+                                        in: stablePlayerCardSongs
+                                    )
+                                }
+                            )
+                            .frame(width: resolvedCardWidth, height: resolvedCardHeight)
+                        }
+                        .position(
+                            x: cardProxy.size.width / 2,
+                            y: cardProxy.size.height * 0.46 + 30
+                        )
+                    }
+                }
+                .ignoresSafeArea()
+                .transition(.opacity)
+                .zIndex(9)
+            }
+
             VStack {
                 Spacer()
                 BottomNavigationBar(
@@ -220,7 +274,7 @@ struct ContentView: View {
                     isPlayerCardVisible: isPlayerCardVisible,
                     isDropTargeted: false,
                     playerPillFrame: $playerPillFrame,
-                    onPlayerTap: toggleCurrentPlayback,
+                    onPlayerTap: showPlayerCard,
                     onTogglePlayback: toggleCurrentPlayback,
                     onPrevious: {
                         playAdjacentSong(step: -1)
@@ -235,7 +289,11 @@ struct ContentView: View {
                 .padding(.horizontal, 8)
                 .padding(.bottom, 12)
             }
-            .blur(radius: sceneBackdropBlur, opaque: false)
+            .blur(radius: isPlayerCardVisible ? 0 : sceneBackdropBlur, opaque: false)
+            .opacity(isPlayerCardVisible ? 0 : 1)
+            .offset(y: isPlayerCardVisible ? 36 : 0)
+            .allowsHitTesting(isPlayerCardVisible == false)
+            .accessibilityHidden(isPlayerCardVisible)
             .animation(.smooth(duration: 0.24, extraBounce: 0.0), value: activeTab)
             .animation(.smooth(duration: 0.24, extraBounce: 0.0), value: isPlayerCardVisible)
             .zIndex(8)
@@ -358,9 +416,22 @@ struct ContentView: View {
         let visibleWindow = Array(visibleHomeSongs.prefix(120))
         let sourceWindow = Array(songs.prefix(180))
         let playbackPool = [song] + visibleWindow + sourceWindow
-        let playableSongs = playbackPool.filter { $0.isPlayable && $0.isPlaceholder == false }
+        let playableSongs = uniquePlayerSongs(
+            from: playbackPool.filter { $0.isPlayable && $0.isPlaceholder == false }
+        )
         guard playableSongs.isEmpty == false else { return [song] }
         return Array(playableSongs.prefix(180))
+    }
+
+    private func uniquePlayerSongs(from songs: [DemoSong]) -> [DemoSong] {
+        var seenIDs = Set<Int>()
+        var seenContent = Set<String>()
+        return songs.filter { song in
+            let contentKey = "\(song.title.lowercased())|\(song.artist.lowercased())"
+            guard seenIDs.insert(song.id).inserted else { return false }
+            guard seenContent.insert(contentKey).inserted else { return false }
+            return true
+        }
     }
 
     private func toggleCurrentPlayback() {
@@ -447,6 +518,7 @@ struct ContentView: View {
         guard !isPlayerCardVisible else { return }
         stopHomeDrift()
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        playerCardPlaybackSongs = playerPlaybackSongs
         activeTab = .player
         isPlayerCardContentVisible = false
         isPlayerCardDismissing = false
@@ -472,6 +544,7 @@ struct ContentView: View {
             isPlayerCardVisible = false
             isPlayerCardContentVisible = false
             isPlayerCardDismissing = false
+            playerCardPlaybackSongs = []
             activeTab = .home
         }
     }
@@ -1686,6 +1759,8 @@ private struct ProfilePage: View {
 
                     SourceSettingsPanel(connector: connector)
 
+                    PlaylistCuratorPanel(connector: connector)
+
                     ArtistPlaybackPanel(connector: connector) { artistID in
                         UIImpactFeedbackGenerator(style: .medium).impactOccurred(intensity: 0.70)
                         if connector.playArtistRadio(artistID: artistID) {
@@ -1777,6 +1852,8 @@ private struct SettingsModalView: View {
                     )
 
                     SourceSettingsPanel(connector: connector)
+
+                    PlaylistCuratorPanel(connector: connector)
 
                     ArtistPlaybackPanel(connector: connector) { artistID in
                         UIImpactFeedbackGenerator(style: .medium).impactOccurred(intensity: 0.70)
@@ -2058,6 +2135,233 @@ private struct SourceSettingsPanel: View {
     }
 }
 
+private struct PlaylistCuratorPanel: View {
+    @ObservedObject var connector: MusicConnectionManager
+    @State private var selectedCount = 25
+    @State private var isPlaylistPresented = false
+
+    var body: some View {
+        VStack(spacing: 10) {
+            HStack(spacing: 10) {
+                Image(systemName: "wand.and.stars")
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundStyle(Color(red: 0.36, green: 1.0, blue: 0.52))
+                    .frame(width: 30, height: 30)
+                    .background(.white.opacity(0.08))
+                    .clipShape(Circle())
+
+                Text("提炼播放列表")
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundStyle(.white)
+
+                Spacer()
+
+                Picker("歌曲数量", selection: $selectedCount) {
+                    ForEach(PlaylistCurator.supportedCounts, id: \.self) { count in
+                        Text("\(count)").tag(count)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 154)
+            }
+
+            Button {
+                UIImpactFeedbackGenerator(style: .medium).impactOccurred(intensity: 0.72)
+                if connector.curatePlaylist(count: selectedCount) {
+                    isPlaylistPresented = true
+                }
+            } label: {
+                Label("开始提炼", systemImage: "sparkles")
+                    .font(.system(size: 14, weight: .black))
+                    .foregroundStyle(.black.opacity(0.88))
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 42)
+                    .background(Color(red: 0.30, green: 0.96, blue: 0.46))
+                    .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .disabled(connector.isAppleMusicReady == false)
+            .opacity(connector.isAppleMusicReady ? 1 : 0.42)
+        }
+        .padding(12)
+        .background(.black.opacity(0.48))
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .sheet(isPresented: $isPlaylistPresented) {
+            CuratedPlaylistSheet(connector: connector, selectedCount: $selectedCount)
+        }
+    }
+}
+
+private struct CuratedPlaylistSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject var connector: MusicConnectionManager
+    @Binding var selectedCount: Int
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                Color(red: 0.015, green: 0.02, blue: 0.035)
+                    .ignoresSafeArea()
+
+                if let playlist = connector.curatedPlaylist {
+                    ScrollView(showsIndicators: false) {
+                        VStack(alignment: .leading, spacing: 22) {
+                            playlistHeader(playlist)
+
+                            ForEach(playlist.sections) { section in
+                                playlistSection(section)
+                            }
+
+                            actionBar
+                                .padding(.top, 4)
+                        }
+                        .padding(.horizontal, 18)
+                        .padding(.bottom, 28)
+                    }
+                } else {
+                    ProgressView()
+                        .tint(.white)
+                }
+            }
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button {
+                        dismiss()
+                    } label: {
+                        Image(systemName: "xmark")
+                    }
+                    .accessibilityLabel("关闭")
+                }
+
+                ToolbarItem(placement: .topBarTrailing) {
+                    Picker("歌曲数量", selection: $selectedCount) {
+                        ForEach(PlaylistCurator.supportedCounts, id: \.self) { count in
+                            Text("\(count) 首").tag(count)
+                        }
+                    }
+                    .onChange(of: selectedCount) { _, count in
+                        connector.curatePlaylist(count: count)
+                    }
+                }
+            }
+            .toolbarBackground(.black.opacity(0.82), for: .navigationBar)
+            .toolbarColorScheme(.dark, for: .navigationBar)
+        }
+        .presentationDetents([.large])
+        .presentationDragIndicator(.visible)
+    }
+
+    private func playlistHeader(_ playlist: CuratedPlaylistPresentation) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(playlist.title)
+                .font(.system(size: 34, weight: .black))
+                .foregroundStyle(.white)
+
+            Text("\(playlist.songs.count) 首 · \(topArtists(in: playlist.songs))")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.52))
+                .lineLimit(2)
+        }
+        .padding(.top, 18)
+    }
+
+    private func playlistSection(_ section: CuratedPlaylistDisplaySection) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text(section.kind.title)
+                    .font(.system(size: 17, weight: .bold))
+                    .foregroundStyle(.white)
+                Spacer()
+                Text("\(section.songs.count)")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(.white.opacity(0.42))
+            }
+
+            VStack(spacing: 0) {
+                ForEach(Array(section.songs.enumerated()), id: \.element.id) { index, song in
+                    HStack(spacing: 12) {
+                        ZStack {
+                            LinearGradient(colors: song.colors, startPoint: .topLeading, endPoint: .bottomTrailing)
+                            SongArtworkLayer(song: song)
+                        }
+                        .frame(width: 42, height: 42)
+                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(song.title)
+                                .font(.system(size: 14, weight: .bold))
+                                .foregroundStyle(.white)
+                                .lineLimit(1)
+                            Text(song.artist)
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(.white.opacity(0.48))
+                                .lineLimit(1)
+                        }
+
+                        Spacer()
+
+                        Text("\(index + 1)")
+                            .font(.system(size: 11, weight: .bold, design: .rounded))
+                            .foregroundStyle(.white.opacity(0.32))
+                    }
+                    .frame(height: 56)
+
+                    if index < section.songs.count - 1 {
+                        Divider().overlay(.white.opacity(0.07)).padding(.leading, 54)
+                    }
+                }
+            }
+        }
+    }
+
+    private var actionBar: some View {
+        HStack(spacing: 10) {
+            Button {
+                UIImpactFeedbackGenerator(style: .medium).impactOccurred(intensity: 0.72)
+                connector.playCuratedPlaylist()
+                dismiss()
+            } label: {
+                Label("播放", systemImage: "play.fill")
+                    .font(.system(size: 15, weight: .black))
+                    .foregroundStyle(.black)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 50)
+                    .background(Color(red: 0.30, green: 0.96, blue: 0.46))
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                Task { await connector.saveCuratedPlaylistToAppleMusic() }
+            } label: {
+                Group {
+                    if connector.isSavingCuratedPlaylist {
+                        ProgressView().tint(.white)
+                    } else {
+                        Label("存入音乐", systemImage: "square.and.arrow.down")
+                    }
+                }
+                .font(.system(size: 15, weight: .bold))
+                .foregroundStyle(.white)
+                .frame(maxWidth: .infinity)
+                .frame(height: 50)
+                .background(.white.opacity(0.10))
+                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .disabled(connector.isSavingCuratedPlaylist)
+        }
+    }
+
+    private func topArtists(in songs: [DemoSong]) -> String {
+        Dictionary(grouping: songs, by: \.artist)
+            .sorted { $0.value.count > $1.value.count }
+            .prefix(3)
+            .map(\.key)
+            .joined(separator: "、")
+    }
+}
+
 private struct PrivacySupportPanel: View {
     let onShowPrivacyPolicy: () -> Void
 
@@ -2112,18 +2416,18 @@ private struct PrivacyPolicyView: View {
         NavigationStack {
             ScrollView(showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 24) {
-                    Text("生效日期：2026 年 8 月 4 日")
+                    Text("生效日期：2026 年 8 月 11 日")
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(.white.opacity(0.50))
 
                     policySection(
                         title: "我们读取什么",
-                        text: "获得你的明确授权后，FlipMusic 会读取 Apple Music 资料库中的歌曲、歌单、专辑、播放次数和最近播放信息。"
+                        text: "获得你的明确授权后，FlipMusic 会读取 Apple Music 资料库中的歌曲、歌单、专辑、播放次数和最近播放信息。只有当你主动点击“存入音乐”时，我们才会在 Apple Music 中创建对应歌单。"
                     )
 
                     policySection(
                         title: "如何使用",
-                        text: "这些资料用于在 App 内展示音乐、生成个性化排序并控制 Apple Music 播放。我们不运营用户账号或后台数据库，不销售你的数据。"
+                        text: "这些资料用于在 App 内展示音乐、生成个性化排序与播放列表并控制 Apple Music 播放。我们不运营用户账号或后台数据库，不销售你的数据。"
                     )
 
                     policySection(
@@ -2350,6 +2654,31 @@ private struct ArtistPlaybackOption: Identifiable {
     let previewSong: DemoSong
 }
 
+private enum PlaylistSaveError: LocalizedError {
+    case creationFailed
+
+    var errorDescription: String? {
+        "Apple Music 没有创建播放列表。"
+    }
+}
+
+private struct CuratedPlaylistDisplaySection: Identifiable {
+    let kind: CuratedPlaylistSection.Kind
+    let songs: [DemoSong]
+
+    var id: String { kind.rawValue }
+}
+
+private struct CuratedPlaylistPresentation: Identifiable {
+    let id: UUID
+    let title: String
+    let sections: [CuratedPlaylistDisplaySection]
+
+    var songs: [DemoSong] {
+        sections.flatMap(\.songs)
+    }
+}
+
 
 @MainActor
 private final class MusicConnectionManager: ObservableObject {
@@ -2387,6 +2716,8 @@ private final class MusicConnectionManager: ObservableObject {
     @Published var showPlaybackLoadingToast = false
     @Published private(set) var songCacheRevision = 0
     @Published var moodPreference = MusicMoodPreference.load()
+    @Published private(set) var curatedPlaylist: CuratedPlaylistPresentation?
+    @Published private(set) var isSavingCuratedPlaylist = false
     @AppStorage("appleMusicConnected") private var appleMusicConnected = false
     @AppStorage("selectedApplePlaylistID") var selectedApplePlaylistID = MusicPlaylistOption.allID
     @AppStorage("aiRecommendationsEnabled") var aiRecommendationsEnabled = true
@@ -2394,6 +2725,7 @@ private final class MusicConnectionManager: ObservableObject {
     private var playbackLoadingTask: Task<Void, Never>?
     private var queuedPlaybackTask: Task<Void, Never>?
     private var playbackStartVerificationTask: Task<Void, Never>?
+    private var playbackPreparationWatchdogTask: Task<Void, Never>?
     private var pendingPlaybackStart: PendingPlaybackStart?
     private var playbackPrefetchTask: Task<Void, Never>?
     private var homeFeedTask: Task<Void, Never>?
@@ -2431,6 +2763,7 @@ private final class MusicConnectionManager: ObservableObject {
     private var suppressSongCacheRebuild = false
     private var didPerformInitialLibraryRefresh = false
     private let musicPlayer = MPMusicPlayerController.systemMusicPlayer
+    private var savedCuratedPlaylistID: UUID?
 
     var discoverySongs: [DemoSong] {
         discoverySongsCache
@@ -2533,6 +2866,121 @@ private final class MusicConnectionManager: ObservableObject {
         queuePlayback(for: firstSong, in: queueSongs, randomizeQueue: false)
         message = "正在播放 \(firstSong.artist)"
         return true
+    }
+
+    @discardableResult
+    func curatePlaylist(count: Int) -> Bool {
+        let playableLibrarySongs = librarySongs.filter {
+            $0.mediaItem != nil && $0.isPlayable && $0.isPlaceholder == false && $0.isAlbumCard == false
+        }
+        guard playableLibrarySongs.isEmpty == false else {
+            message = isAppleMusicReady
+                ? "资料库里还没有可用于提炼的歌曲。"
+                : "请先连接 Apple Music。"
+            return false
+        }
+
+        let seeds = playableLibrarySongs.map { song in
+            PlaylistSeedTrack(
+                id: song.id,
+                title: song.title,
+                artist: song.artist,
+                playCount: song.mediaItem?.playCount ?? 0,
+                lastPlayedDate: song.mediaItem?.lastPlayedDate,
+                energy: song.rhythmEnergy
+            )
+        }
+        let draft = PlaylistCurator.curate(seeds, requestedCount: count)
+        let songsByID = Dictionary(uniqueKeysWithValues: playableLibrarySongs.map { ($0.id, $0) })
+        let sections = draft.sections.compactMap { section -> CuratedPlaylistDisplaySection? in
+            let songs = section.tracks.compactMap { songsByID[$0.id] }
+            guard songs.isEmpty == false else { return nil }
+            return CuratedPlaylistDisplaySection(kind: section.kind, songs: songs)
+        }
+        guard sections.isEmpty == false else {
+            message = "暂时无法从资料库提炼播放列表。"
+            return false
+        }
+
+        curatedPlaylist = CuratedPlaylistPresentation(id: UUID(), title: draft.title, sections: sections)
+        savedCuratedPlaylistID = nil
+        let curatedSongCount = sections.reduce(0) { $0 + $1.songs.count }
+        message = "已提炼 \(curatedSongCount) 首歌曲"
+        return true
+    }
+
+    @discardableResult
+    func playCuratedPlaylist() -> Bool {
+        guard let playlist = curatedPlaylist, let firstSong = playlist.songs.first else {
+            message = "请先提炼播放列表。"
+            return false
+        }
+        queuePlayback(for: firstSong, in: playlist.songs, randomizeQueue: false)
+        message = "正在播放「\(playlist.title)」"
+        return true
+    }
+
+    func saveCuratedPlaylistToAppleMusic() async {
+        guard isSavingCuratedPlaylist == false,
+              let draft = curatedPlaylist else { return }
+        guard savedCuratedPlaylistID != draft.id else {
+            message = "「\(draft.title)」已经存入 Apple Music。"
+            return
+        }
+        let mediaItems = draft.songs.compactMap(\.mediaItem)
+        guard mediaItems.isEmpty == false else {
+            message = "这张播放列表没有可保存的资料库歌曲。"
+            return
+        }
+
+        isSavingCuratedPlaylist = true
+        defer { isSavingCuratedPlaylist = false }
+        do {
+            let playlist = try await createAppleMusicPlaylist(
+                id: draft.id,
+                title: draft.title,
+                description: "由 FlipMusic 根据你的 Apple Music 资料库与播放偏好提炼。"
+            )
+            try await add(mediaItems: mediaItems, to: playlist)
+            savedCuratedPlaylistID = draft.id
+            message = "已存入 Apple Music：\(draft.title)"
+            loadAppleMusicLibrary()
+        } catch {
+            message = "保存失败：\(error.localizedDescription)"
+        }
+    }
+
+    private func createAppleMusicPlaylist(
+        id: UUID,
+        title: String,
+        description: String
+    ) async throws -> MPMediaPlaylist {
+        let metadata = MPMediaPlaylistCreationMetadata(name: title)
+        metadata.authorDisplayName = "FlipMusic"
+        metadata.descriptionText = description
+        return try await withCheckedThrowingContinuation { continuation in
+            MPMediaLibrary.default().getPlaylist(with: id, creationMetadata: metadata) { playlist, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else if let playlist {
+                    continuation.resume(returning: playlist)
+                } else {
+                    continuation.resume(throwing: PlaylistSaveError.creationFailed)
+                }
+            }
+        }
+    }
+
+    private func add(mediaItems: [MPMediaItem], to playlist: MPMediaPlaylist) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            playlist.add(mediaItems) { error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume(returning: ())
+                }
+            }
+        }
     }
 
     private func artistPlaybackSongs(forArtistID artistID: String) -> [DemoSong] {
@@ -3002,6 +3450,10 @@ private final class MusicConnectionManager: ObservableObject {
         queuePlayback(for: song, in: queueSongs, randomizeQueue: true)
     }
 
+    func queuePlaybackPreservingOrder(for song: DemoSong, in queueSongs: [DemoSong]) {
+        queuePlayback(for: song, in: queueSongs, randomizeQueue: false)
+    }
+
     func queuedNeighbor(for song: DemoSong, step: Int, fallbackSongs: [DemoSong]) -> DemoSong? {
         if let queuedSong = adjacentSong(to: song, step: step, in: activePlaybackQueue) {
             return queuedSong
@@ -3028,8 +3480,7 @@ private final class MusicConnectionManager: ObservableObject {
 
     private func queuePlayback(for song: DemoSong, in queueSongs: [DemoSong]? = nil, randomizeQueue: Bool) {
         if song.isAlbumCard, let albumID = song.albumPersistentID {
-            let albumSongs = librarySongs
-                .filter { $0.albumPersistentID == albumID && $0.isPlayable }
+            let albumSongs = songsForAlbum(with: albumID)
                 .sorted { lhs, rhs in
                     (lhs.mediaItem?.albumTrackNumber ?? 0) < (rhs.mediaItem?.albumTrackNumber ?? 0)
                 }
@@ -3050,6 +3501,8 @@ private final class MusicConnectionManager: ObservableObject {
         queuedPlaybackTask?.cancel()
         playbackStartVerificationTask?.cancel()
         playbackStartVerificationTask = nil
+        playbackPreparationWatchdogTask?.cancel()
+        playbackPreparationWatchdogTask = nil
         autoAdvanceTask?.cancel()
         autoAdvanceTask = nil
         playbackPrefetchTask?.cancel()
@@ -3077,6 +3530,21 @@ private final class MusicConnectionManager: ObservableObject {
             lastPlayerQueueCommitTime = Date().timeIntervalSinceReferenceDate
             setPlaybackQueue(on: player, startingWith: song, in: queueSnapshot)
             prepareAndStartPlayback(on: player, song: song, queueSongs: queueSnapshot, requestID: requestID)
+        }
+    }
+
+    private func songsForAlbum(with albumID: MPMediaEntityPersistentID) -> [DemoSong] {
+        if let collection = appleMusicAlbumCollections().first(where: { collection in
+            collection.items.contains { $0.albumPersistentID == albumID }
+        }) {
+            return collection.items
+                .filter { $0.mediaType.contains(.music) && $0.title?.isEmpty == false }
+                .map(song(from:))
+                .filter(\.isPlayable)
+        }
+
+        return librarySongs.filter {
+            $0.albumPersistentID == albumID && $0.isPlayable
         }
     }
 
@@ -3245,6 +3713,12 @@ private final class MusicConnectionManager: ObservableObject {
 
         startPendingPlaybackIfReady(on: player)
 
+        if let pending = pendingPlaybackStart,
+           pending.requestID == playbackRequestID,
+           isPlayerCurrentlyOn(pending.song, player: player) == false {
+            return
+        }
+
         if let matchedSong = song(matching: item) {
             currentSong = matchedSong
             playingSongID = matchedSong.id
@@ -3385,6 +3859,8 @@ private final class MusicConnectionManager: ObservableObject {
             Task { @MainActor [weak self] in
                 guard let self, self.playingSongID == song.id, self.playbackRequestID == requestID else { return }
                 if let error {
+                    self.playbackPreparationWatchdogTask?.cancel()
+                    self.playbackPreparationWatchdogTask = nil
                     if self.startPreviewPlayback(for: song, in: queueSongs, requestID: requestID) {
                         return
                     }
@@ -3409,6 +3885,12 @@ private final class MusicConnectionManager: ObservableObject {
                 }
             }
         }
+        schedulePlaybackPreparationWatchdog(
+            on: player,
+            song: song,
+            queueSongs: queueSongs,
+            requestID: requestID
+        )
     }
 
     @discardableResult
@@ -3423,6 +3905,8 @@ private final class MusicConnectionManager: ObservableObject {
 
         pending.didStart = true
         pendingPlaybackStart = pending
+        playbackPreparationWatchdogTask?.cancel()
+        playbackPreparationWatchdogTask = nil
         playbackCoreState.didStart(songID: pending.song.id)
         previewPlaybackTask?.cancel()
         player.skipToBeginning()
@@ -3436,6 +3920,39 @@ private final class MusicConnectionManager: ObservableObject {
         message = "正在播放：\(pending.song.title)"
         verifyPlaybackStartedAtBeginning(on: player, pending: pending)
         return true
+    }
+
+    private func schedulePlaybackPreparationWatchdog(
+        on player: MPMusicPlayerController,
+        song: DemoSong,
+        queueSongs: [DemoSong]?,
+        requestID: Int
+    ) {
+        playbackPreparationWatchdogTask?.cancel()
+        playbackPreparationWatchdogTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(1_800))
+            guard !Task.isCancelled,
+                  let self,
+                  self.playbackRequestID == requestID,
+                  var pending = self.pendingPlaybackStart,
+                  pending.requestID == requestID,
+                  pending.didStart == false else { return }
+
+            if self.isPlayerCurrentlyOn(song, player: player) {
+                pending.isPrepared = true
+                self.pendingPlaybackStart = pending
+                if self.startPendingPlaybackIfReady(on: player) {
+                    return
+                }
+            }
+
+            self.pendingPlaybackStart = nil
+            self.endPlaybackLoading(requestID: requestID)
+            self.isPlaying = false
+            self.playingSongID = nil
+            self.message = "Apple Music 暂时无法加载这张专辑，请换一张重试。"
+            self.playbackPreparationWatchdogTask = nil
+        }
     }
 
     private func verifyPlaybackStartedAtBeginning(
@@ -3501,6 +4018,8 @@ private final class MusicConnectionManager: ObservableObject {
         previewPlaybackTask?.cancel()
         playbackStartVerificationTask?.cancel()
         playbackStartVerificationTask = nil
+        playbackPreparationWatchdogTask?.cancel()
+        playbackPreparationWatchdogTask = nil
         pendingPlaybackStart = nil
         if musicPlayer.playbackState == .playing || musicPlayer.playbackState == .paused {
             musicPlayer.stop()
@@ -4759,6 +5278,8 @@ private final class MusicConnectionManager: ObservableObject {
     }
 
     private func endPlaybackLoading(requestID: Int? = nil) {
+        playbackPreparationWatchdogTask?.cancel()
+        playbackPreparationWatchdogTask = nil
         playbackLoadingTask?.cancel()
         playbackLoadingTask = nil
         playbackLoadingTask = Task { @MainActor in
@@ -5457,6 +5978,1154 @@ private struct MusicParticleSpec {
     let coreTint: Color
     let style: Style
     let hasGlow: Bool
+}
+
+private struct FluidPlayerOverlay: View {
+    let songs: [DemoSong]
+    let nowPlaying: DemoSong
+    let isPlaying: Bool
+    let isContentVisible: Bool
+    let onClose: () -> Void
+    let onSongChange: (DemoSong) -> Void
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var currentIndex = 0
+    @State private var targetIndex: Int?
+    @State private var transitionProgress: CGFloat = 0
+    @State private var transitionDirection: CGFloat = 1
+    @State private var dragOffset: CGFloat = 0
+    @State private var transitionTask: Task<Void, Never>?
+    @StateObject private var spatialMotion = SpatialArtworkMotionObserver()
+
+    private var transitionDuration: Double { reduceMotion ? 0.22 : 0.56 }
+    private var spatialParallax: CGSize { reduceMotion ? .zero : spatialMotion.parallax }
+    private var edgeHighlightAngle: Angle {
+        .degrees(Double(spatialParallax.width * 28 + spatialParallax.height * 16))
+    }
+    private var cardFlipAngle: Double {
+        guard reduceMotion == false else { return 0 }
+        let motionAngle = Double(spatialParallax.width) * 11
+        let normalizedDrag = max(-1, min(1, dragOffset / 110))
+        let dragAngle = -Double(normalizedDrag) * 8
+        guard isTransitioning else { return motionAngle + dragAngle }
+        let transitionArc = sin(Double(transitionProgress) * .pi)
+        let dragHandoff = dragAngle * Double(1 - transitionProgress)
+        return motionAngle + dragHandoff - Double(transitionDirection) * 7 * transitionArc
+    }
+    private var cardDepthScale: CGFloat {
+        guard reduceMotion == false, isTransitioning else { return 1 }
+        return 1 - CGFloat(sin(Double(transitionProgress) * .pi)) * 0.035
+    }
+
+    var body: some View {
+        GeometryReader { proxy in
+            let topInset = max(proxy.safeAreaInsets.top, 8)
+            ZStack {
+                FluidPlayerBackdrop(
+                    song: currentSong,
+                    isPlaying: isPlaying,
+                    parallax: spatialParallax
+                )
+
+                if let targetSong {
+                    FluidPlayerBackdrop(
+                        song: targetSong,
+                        isPlaying: isPlaying,
+                        parallax: spatialParallax
+                    )
+                        .mask {
+                            if reduceMotion {
+                                Rectangle()
+                                    .fill(.white.opacity(transitionProgress))
+                            } else {
+                                FluidSwipeMask(
+                                    size: proxy.size,
+                                    progress: transitionProgress,
+                                    direction: transitionDirection
+                                )
+                            }
+                        }
+                }
+
+                FluidPlayerPage(
+                    song: currentSong,
+                    isPlaying: isPlaying
+                )
+                .offset(x: currentPageOffset(width: proxy.size.width))
+                .opacity(Double(currentPageOpacity))
+
+                if let targetSong {
+                    FluidPlayerPage(
+                        song: targetSong,
+                        isPlaying: isPlaying
+                    )
+                    .offset(x: targetPageOffset(width: proxy.size.width))
+                    .opacity(Double(targetPageOpacity))
+                    .allowsHitTesting(false)
+                }
+
+                Rectangle()
+                    .fill(.white.opacity(0.001))
+                    .frame(width: proxy.size.width, height: proxy.size.height)
+                    .contentShape(Rectangle())
+                    .gesture(playerSwipeGesture())
+                    .position(x: proxy.size.width / 2, y: proxy.size.height / 2)
+                    .accessibilityHidden(true)
+
+                Button(action: onClose) {
+                    Image(systemName: "chevron.down")
+                        .font(.headline.weight(.bold))
+                        .foregroundStyle(
+                            PlayerImmersivePalette(accentColor: currentSong.magicColor).primaryText
+                        )
+                        .frame(width: 44, height: 44)
+                        .liquidGlassSurface(cornerRadius: 22, isInteractive: true)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("关闭播放器")
+                .position(x: 34, y: topInset + 28)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(.clear)
+            .contentShape(Rectangle())
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(
+                    AngularGradient(
+                        colors: [
+                            .white.opacity(0.76),
+                            PlayerImmersivePalette(accentColor: currentSong.magicColor).accent.opacity(0.50),
+                            .white.opacity(0.10),
+                            .white.opacity(0.38),
+                            PlayerImmersivePalette(accentColor: currentSong.magicColor).accent.opacity(0.34),
+                            .white.opacity(0.76)
+                        ],
+                        center: .center,
+                        angle: edgeHighlightAngle
+                    ),
+                    lineWidth: 1.4
+                )
+                .padding(0.7)
+                .blendMode(.screen)
+                .allowsHitTesting(false)
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 23, style: .continuous)
+                .inset(by: 2.2)
+                .stroke(.white.opacity(0.10), lineWidth: 0.8)
+                .blur(radius: 0.25)
+                .allowsHitTesting(false)
+        }
+        .compositingGroup()
+        .rotation3DEffect(
+            .degrees(cardFlipAngle),
+            axis: (x: 0, y: 1, z: 0),
+            anchor: .center,
+            perspective: 0.72
+        )
+        .scaleEffect(cardDepthScale)
+        .offset(x: dragOffset * 0.12)
+        .opacity(isContentVisible ? 1 : 0)
+        .scaleEffect(isContentVisible ? 1 : 0.985)
+        .animation(.easeOut(duration: 0.18), value: isContentVisible)
+        .shadow(
+            color: PlayerImmersivePalette(accentColor: currentSong.magicColor).accent.opacity(0.08),
+            radius: 22,
+            x: 0,
+            y: 12
+        )
+        .shadow(
+            color: .black.opacity(0.48),
+            radius: 28,
+            x: 0,
+            y: 18
+        )
+        .onAppear {
+            syncCurrentIndex()
+            preloadNearbyArtwork()
+            if reduceMotion == false {
+                spatialMotion.start()
+            }
+        }
+        .onChange(of: nowPlaying.id) { _, _ in
+            guard !isTransitioning else { return }
+            syncCurrentIndex()
+            preloadNearbyArtwork()
+        }
+        .onChange(of: songs.map(\.id)) { _, _ in
+            guard !isTransitioning else { return }
+            syncCurrentIndex()
+            preloadNearbyArtwork()
+        }
+        .onDisappear {
+            transitionTask?.cancel()
+            spatialMotion.stop()
+        }
+        .onChange(of: reduceMotion) { _, isReduced in
+            if isReduced {
+                spatialMotion.stop()
+            } else {
+                spatialMotion.start()
+            }
+        }
+    }
+
+    private var isTransitioning: Bool {
+        targetIndex != nil
+    }
+
+    private var currentSong: DemoSong {
+        guard isTransitioning, songs.indices.contains(currentIndex) else {
+            return nowPlaying
+        }
+        return songs[currentIndex]
+    }
+
+    private var targetSong: DemoSong? {
+        guard let targetIndex, songs.indices.contains(targetIndex) else { return nil }
+        return songs[targetIndex]
+    }
+
+    private var currentPageOpacity: CGFloat {
+        reduceMotion ? 1 - transitionProgress : max(0, 1 - transitionProgress * 1.55)
+    }
+
+    private var targetPageOpacity: CGFloat {
+        reduceMotion ? transitionProgress : min(1, max(0, (transitionProgress - 0.12) * 1.35))
+    }
+
+    private func currentPageOffset(width: CGFloat) -> CGFloat {
+        guard isTransitioning, !reduceMotion else { return 0 }
+        return -transitionDirection * width * 0.24 * transitionProgress
+    }
+
+    private func targetPageOffset(width: CGFloat) -> CGFloat {
+        guard !reduceMotion else { return 0 }
+        return transitionDirection * width * 0.28 * (1 - transitionProgress)
+    }
+
+    private func resistedDrag(_ offset: CGFloat) -> CGFloat {
+        if currentIndex == 0 && offset > 0 { return offset * 0.16 }
+        if currentIndex == songs.count - 1 && offset < 0 { return offset * 0.16 }
+        return max(min(offset, 110), -110)
+    }
+
+    private func playerSwipeGesture() -> some Gesture {
+        DragGesture(minimumDistance: 12, coordinateSpace: .local)
+            .onChanged { value in
+                guard !isTransitioning else { return }
+                let horizontal = value.translation.width
+                guard abs(horizontal) > abs(value.translation.height) * 1.15 else { return }
+                dragOffset = resistedDrag(horizontal)
+            }
+            .onEnded { value in
+                guard !isTransitioning else { return }
+                finishDrag(value)
+            }
+    }
+
+    private func finishDrag(_ value: DragGesture.Value) {
+        let threshold: CGFloat = 64
+        let translation = value.translation.width
+        let predicted = value.predictedEndTranslation.width
+
+        if translation < -threshold || predicted < -threshold * 1.45 {
+            beginTransition(step: 1)
+        } else if translation > threshold || predicted > threshold * 1.45 {
+            beginTransition(step: -1)
+        }
+
+        withAnimation(.smooth(duration: 0.20, extraBounce: 0.0)) {
+            dragOffset = 0
+        }
+    }
+
+    private func beginTransition(step: Int) {
+        guard !isTransitioning, songs.isEmpty == false else { return }
+        let nextIndex = currentIndex + step
+        guard songs.indices.contains(nextIndex) else {
+            UINotificationFeedbackGenerator().notificationOccurred(.warning)
+            return
+        }
+
+        let song = songs[nextIndex]
+        transitionTask?.cancel()
+        transitionDirection = step >= 0 ? 1 : -1
+        targetIndex = nextIndex
+        transitionProgress = 0
+        PlayerArtworkWarmupCache.shared.preload(songs: [song])
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred(intensity: 0.72)
+
+        onSongChange(song)
+
+        withAnimation(.timingCurve(0.16, 0.72, 0.18, 1, duration: transitionDuration)) {
+            transitionProgress = 1
+        }
+
+        transitionTask = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(transitionDuration))
+            guard !Task.isCancelled else { return }
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                targetIndex = nil
+                transitionProgress = 0
+                currentIndex = indexForNowPlaying() ?? nextIndex
+                dragOffset = 0
+            }
+            preloadNearbyArtwork()
+        }
+    }
+
+    private func syncCurrentIndex() {
+        let resolvedIndex = indexForNowPlaying() ?? currentIndex
+        guard resolvedIndex != currentIndex || targetIndex != nil else { return }
+        currentIndex = resolvedIndex
+        targetIndex = nil
+        transitionProgress = 0
+        dragOffset = 0
+    }
+
+    private func indexForNowPlaying() -> Int? {
+        songs.firstIndex(where: { playerSong($0, matches: nowPlaying) })
+    }
+
+    private func playerSong(_ lhs: DemoSong, matches rhs: DemoSong) -> Bool {
+        if lhs.id == rhs.id { return true }
+
+        if let leftStoreID = lhs.storeID,
+           let rightStoreID = rhs.storeID,
+           leftStoreID.isEmpty == false,
+           leftStoreID == rightStoreID {
+            return true
+        }
+
+        let leftPersistentID = lhs.mediaItem?.persistentID ?? 0
+        let rightPersistentID = rhs.mediaItem?.persistentID ?? 0
+        if leftPersistentID != 0, leftPersistentID == rightPersistentID {
+            return true
+        }
+
+        return lhs.title.compare(rhs.title, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame
+            && lhs.artist.compare(rhs.artist, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame
+    }
+
+    private func preloadNearbyArtwork() {
+        guard songs.indices.contains(currentIndex) else { return }
+        let lower = max(0, currentIndex - 2)
+        let upper = min(songs.count - 1, currentIndex + 4)
+        PlayerArtworkWarmupCache.shared.preload(songs: Array(songs[lower...upper]))
+    }
+}
+
+private struct FluidSwipeMask: View {
+    let size: CGSize
+    let progress: CGFloat
+    let direction: CGFloat
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: progress <= 0 || progress >= 1)) { timeline in
+            let time = timeline.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 120)
+            Rectangle()
+                .fill(.white)
+                .colorEffect(
+                    ShaderLibrary.fluidSwipeMask(
+                        .float2(Float(size.width), Float(size.height)),
+                        .float(Float(progress)),
+                        .float(Float(direction)),
+                        .float(Float(time))
+                    )
+                )
+        }
+    }
+}
+
+private struct FluidPlayerBackdrop: View {
+    let song: DemoSong
+    let isPlaying: Bool
+    let parallax: CGSize
+
+    var body: some View {
+        let palette = PlayerImmersivePalette(accentColor: song.magicColor)
+
+        GeometryReader { proxy in
+            let artworkHeight = proxy.size.height * 0.70
+
+            ZStack(alignment: .topLeading) {
+                SongArtworkLayer(song: song)
+                    .frame(width: proxy.size.width, height: artworkHeight)
+                    .scaleEffect(1.05)
+                    .offset(x: parallax.width * 7, y: parallax.height * 5)
+                    .clipped()
+                    .mask {
+                        LinearGradient(
+                            gradient: Gradient(stops: [
+                                .init(color: .white, location: 0.00),
+                                .init(color: .white, location: 0.62),
+                                .init(color: .white.opacity(0.82), location: 0.72),
+                                .init(color: .white.opacity(0.46), location: 0.86),
+                                .init(color: .white.opacity(0.16), location: 0.95),
+                                .init(color: .clear, location: 1.00)
+                            ]),
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    }
+
+                Rectangle()
+                    .fill(.ultraThinMaterial)
+                    .opacity(0.10)
+
+                VStack(spacing: 0) {
+                    Spacer(minLength: 0)
+
+                    Rectangle()
+                        .fill(.ultraThinMaterial)
+                        .overlay {
+                            Color.black
+                                .opacity(0.82)
+                        }
+                        .overlay {
+                            LinearGradient(
+                                colors: [
+                                    .white.opacity(0.018),
+                                    palette.accent.opacity(0.055),
+                                    .white.opacity(0.035),
+                                    .clear
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                            .blendMode(.screen)
+                        }
+                        .mask {
+                            LinearGradient(
+                                gradient: Gradient(stops: [
+                                    .init(color: .clear, location: 0.00),
+                                    .init(color: .white.opacity(0.10), location: 0.12),
+                                    .init(color: .white.opacity(0.38), location: 0.32),
+                                    .init(color: .white.opacity(0.72), location: 0.50),
+                                    .init(color: .white.opacity(0.94), location: 0.66),
+                                    .init(color: .white, location: 0.78),
+                                    .init(color: .white, location: 1.00)
+                                ]),
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                        }
+                        .frame(height: proxy.size.height * 0.60)
+                }
+
+                Rectangle()
+                    .fill(.ultraThinMaterial)
+                    .opacity(0.025)
+
+                VStack(spacing: 0) {
+                    Spacer(minLength: 0)
+
+                    PlayerPillRhythmLights(song: song, isPlaying: isPlaying)
+                        .frame(width: proxy.size.width + 36, height: 104)
+                        .opacity(0.78)
+                        .mask {
+                            LinearGradient(
+                                stops: [
+                                    .init(color: .clear, location: 0.00),
+                                    .init(color: .white.opacity(0.28), location: 0.24),
+                                    .init(color: .white.opacity(0.82), location: 0.52),
+                                    .init(color: .white, location: 0.76),
+                                    .init(color: .white.opacity(0.72), location: 1.00)
+                                ],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                        }
+                        .padding(.bottom, 2)
+                        .allowsHitTesting(false)
+                }
+            }
+            .clipped()
+        }
+    }
+}
+
+private struct SpatialAlbumArtwork: View {
+    let song: DemoSong
+    let parallax: CGSize
+    @ObservedObject private var artistArtworkCache = ArtistArtworkCache.shared
+
+    var body: some View {
+        let _ = artistArtworkCache.revision
+        GeometryReader { proxy in
+            Group {
+                if let artistImage = artistArtworkCache.image(for: song) {
+                    LenticularAlbumArtwork(
+                        song: song,
+                        artistImage: artistImage,
+                        size: proxy.size,
+                        parallax: parallax
+                    )
+                } else {
+                    SpatialFallbackArtwork(
+                        song: song,
+                        parallax: parallax
+                    )
+                }
+            }
+            .frame(width: proxy.size.width, height: proxy.size.height)
+            .clipped()
+            .animation(.smooth(duration: 0.30, extraBounce: 0), value: parallax)
+        }
+        .task(id: song.id) {
+            await artistArtworkCache.prepare(song: song)
+        }
+    }
+}
+
+private struct LenticularAlbumArtwork: View {
+    let song: DemoSong
+    let artistImage: UIImage
+    let size: CGSize
+    let parallax: CGSize
+
+    var body: some View {
+        FluidPlayerLeadingArtwork(song: song)
+            .layerEffect(
+                ShaderLibrary.lenticularArtwork(
+                    .float2(Float(size.width), Float(size.height)),
+                    .image(Image(uiImage: artistImage)),
+                    .float2(Float(parallax.width), Float(parallax.height)),
+                    .float(7.0)
+                ),
+                maxSampleOffset: CGSize(width: 2, height: 2)
+            )
+            .overlay {
+                LinearGradient(
+                    colors: [.clear, .white.opacity(0.11), .clear],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+                .scaleEffect(1.45)
+                .offset(x: parallax.width * 18, y: parallax.height * 8)
+                .blendMode(.screen)
+                .allowsHitTesting(false)
+            }
+    }
+}
+
+private struct SpatialFallbackArtwork: View {
+    let song: DemoSong
+    let parallax: CGSize
+
+    var body: some View {
+        FluidPlayerLeadingArtwork(song: song)
+            .scaleEffect(1.025)
+            .offset(x: parallax.width * 7.0, y: parallax.height * 4.5)
+            .overlay {
+                LinearGradient(
+                    colors: [.clear, .white.opacity(0.045), .clear],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+                .scaleEffect(1.35)
+                .offset(x: parallax.width * 10.0, y: parallax.height * 7.0)
+                .blendMode(.screen)
+                .allowsHitTesting(false)
+            }
+    }
+}
+
+@MainActor
+private final class ArtistArtworkCache: ObservableObject {
+    static let shared = ArtistArtworkCache()
+
+    @Published private(set) var revision = 0
+    private let cache = NSCache<NSString, UIImage>()
+    private var pendingKeys = Set<String>()
+    private var attemptedKeys = Set<String>()
+
+    private init() {
+        cache.countLimit = 48
+    }
+
+    func image(for song: DemoSong) -> UIImage? {
+        guard let key = artistKey(for: song.artist) else { return nil }
+        return cache.object(forKey: key as NSString)
+    }
+
+    func prepare(song: DemoSong) async {
+        guard let queryName = primaryArtistName(from: song.artist),
+              let key = artistKey(for: queryName),
+              cache.object(forKey: key as NSString) == nil,
+              pendingKeys.contains(key) == false,
+              attemptedKeys.contains(key) == false else { return }
+
+        pendingKeys.insert(key)
+        attemptedKeys.insert(key)
+        defer { pendingKeys.remove(key) }
+
+        do {
+            var request = MusicCatalogSearchRequest(term: queryName, types: [Artist.self])
+            request.limit = 8
+            let response = try await request.response()
+            guard let artist = response.artists.first(where: { candidate in
+                artistKey(for: candidate.name) == key
+            }),
+            let artwork = artist.artwork,
+            let url = artwork.url(width: 720, height: 720) else { return }
+
+            var imageRequest = URLRequest(url: url)
+            imageRequest.timeoutInterval = 6
+            let (data, urlResponse) = try await URLSession.shared.data(for: imageRequest)
+            if let httpResponse = urlResponse as? HTTPURLResponse {
+                guard (200...299).contains(httpResponse.statusCode) else { return }
+            }
+            guard let image = UIImage(data: data) else { return }
+            cache.setObject(image, forKey: key as NSString)
+            revision &+= 1
+        } catch {
+            return
+        }
+    }
+
+    private func primaryArtistName(from rawName: String) -> String? {
+        let trimmed = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.isEmpty == false,
+              trimmed.caseInsensitiveCompare("Unknown Artist") != .orderedSame else { return nil }
+
+        let markers = [" feat.", " featuring ", " ft.", " with ", " & ", ",", " x "]
+        let boundary = markers.compactMap { marker in
+            trimmed.range(of: marker, options: [.caseInsensitive, .diacriticInsensitive])?.lowerBound
+        }
+        .min() ?? trimmed.endIndex
+        let primary = String(trimmed[..<boundary]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return primary.isEmpty ? nil : primary
+    }
+
+    private func artistKey(for rawName: String) -> String? {
+        let folded = rawName
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .lowercased()
+        let tokens = folded.components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { $0.isEmpty == false }
+        let key = tokens.joined(separator: " ")
+        return key.isEmpty ? nil : key
+    }
+}
+
+@MainActor
+private final class SpatialDepthCache: ObservableObject {
+    static let shared = SpatialDepthCache()
+
+    @Published private(set) var revision = 0
+    private let cache = NSCache<NSNumber, UIImage>()
+    private var pendingIDs = Set<Int>()
+    private var model: DepthAnythingV2SmallF16?
+    private var modelTask: Task<DepthAnythingV2SmallF16?, Never>?
+
+    private init() {
+        cache.countLimit = 32
+    }
+
+    func depthImage(for song: DemoSong) -> UIImage? {
+        cache.object(forKey: NSNumber(value: song.id))
+    }
+
+    func prepare(song: DemoSong) async {
+        let key = NSNumber(value: song.id)
+        guard cache.object(forKey: key) == nil,
+              pendingIDs.contains(song.id) == false,
+              let source = PlayerArtworkWarmupCache.shared.artwork(for: song)
+                ?? song.artworkImage
+                ?? song.mediaItem?.artwork?.image(at: CGSize(width: 640, height: 640)),
+              let cgImage = source.normalizedCGImage(maxDimension: 640) else { return }
+
+        pendingIDs.insert(song.id)
+        defer { pendingIDs.remove(song.id) }
+
+        guard let model = await depthModel() else { return }
+        do {
+            let input = try DepthAnythingV2SmallF16Input(imageWith: cgImage)
+            let output = try await model.prediction(input: input)
+            guard let depthImage = Self.normalizedDepthImage(from: output.depth) else { return }
+            cache.setObject(depthImage, forKey: key)
+            revision &+= 1
+        } catch {
+            return
+        }
+    }
+
+    private func depthModel() async -> DepthAnythingV2SmallF16? {
+        if let model { return model }
+        if let modelTask { return await modelTask.value }
+
+        let task = Task<DepthAnythingV2SmallF16?, Never> {
+            let configuration = MLModelConfiguration()
+            configuration.computeUnits = .all
+            return try? await DepthAnythingV2SmallF16.load(configuration: configuration)
+        }
+        modelTask = task
+        let loadedModel = await task.value
+        model = loadedModel
+        modelTask = nil
+        return loadedModel
+    }
+
+    nonisolated private static func normalizedDepthImage(from buffer: CVPixelBuffer) -> UIImage? {
+        CVPixelBufferLockBaseAddress(buffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+
+        guard CVPixelBufferGetPixelFormatType(buffer) == kCVPixelFormatType_OneComponent16Half,
+              let baseAddress = CVPixelBufferGetBaseAddress(buffer) else { return nil }
+
+        let width = CVPixelBufferGetWidth(buffer)
+        let height = CVPixelBufferGetHeight(buffer)
+        let rowStride = CVPixelBufferGetBytesPerRow(buffer) / MemoryLayout<UInt16>.size
+        let source = baseAddress.assumingMemoryBound(to: UInt16.self)
+        var minimum = Float.greatestFiniteMagnitude
+        var maximum = -Float.greatestFiniteMagnitude
+
+        for y in 0..<height {
+            for x in 0..<width {
+                let value = Float(Float16(bitPattern: source[y * rowStride + x]))
+                guard value.isFinite else { continue }
+                minimum = min(minimum, value)
+                maximum = max(maximum, value)
+            }
+        }
+        guard maximum > minimum else { return nil }
+
+        var histogram = [Int](repeating: 0, count: 256)
+        let fullRange = maximum - minimum
+        for y in 0..<height {
+            for x in 0..<width {
+                let value = Float(Float16(bitPattern: source[y * rowStride + x]))
+                guard value.isFinite else { continue }
+                let bucket = min(255, max(0, Int((value - minimum) / fullRange * 255)))
+                histogram[bucket] += 1
+            }
+        }
+
+        let pixelCount = width * height
+        let lowTarget = Int(Float(pixelCount) * 0.02)
+        let highTarget = Int(Float(pixelCount) * 0.98)
+        var cumulative = 0
+        var lowBucket = 0
+        var highBucket = 255
+        for index in histogram.indices {
+            cumulative += histogram[index]
+            if cumulative <= lowTarget { lowBucket = index }
+            if cumulative >= highTarget {
+                highBucket = index
+                break
+            }
+        }
+
+        let low = minimum + fullRange * Float(lowBucket) / 255
+        let high = minimum + fullRange * Float(highBucket) / 255
+        let robustRange = max(high - low, 0.0001)
+        var pixels = [UInt8](repeating: 0, count: pixelCount)
+        for y in 0..<height {
+            for x in 0..<width {
+                let value = Float(Float16(bitPattern: source[y * rowStride + x]))
+                let normalized = min(1, max(0, (value - low) / robustRange))
+                pixels[y * width + x] = UInt8(normalized * 255)
+            }
+        }
+
+        guard let provider = CGDataProvider(data: Data(pixels) as CFData),
+              let image = CGImage(
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bitsPerPixel: 8,
+                bytesPerRow: width,
+                space: CGColorSpaceCreateDeviceGray(),
+                bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue),
+                provider: provider,
+                decode: nil,
+                shouldInterpolate: true,
+                intent: .defaultIntent
+              ) else { return nil }
+        return UIImage(cgImage: image)
+    }
+}
+
+private struct ArtworkColorSample {
+    let count: Int
+    let red: CGFloat
+    let green: CGFloat
+    let blue: CGFloat
+    let hue: CGFloat
+    let saturation: CGFloat
+    let brightness: CGFloat
+
+    var visualScore: CGFloat {
+        var score = CGFloat(count) * (0.45 + min(saturation, 0.95) * 1.55)
+        let degrees = hue * 360
+        let isSkinTone = (degrees <= 45 || degrees >= 335)
+            && saturation >= 0.15 && saturation <= 0.80
+            && brightness >= 0.35
+        if isSkinTone { score *= 0.4 }
+        return score
+    }
+}
+
+private extension UIImage {
+    func normalizedCGImage(maxDimension: CGFloat) -> CGImage? {
+        let width = max(size.width, 1)
+        let height = max(size.height, 1)
+        let scale = min(1, maxDimension / max(width, height))
+        let targetSize = CGSize(width: width * scale, height: height * scale)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        let normalized = UIGraphicsImageRenderer(size: targetSize, format: format).image { _ in
+            draw(in: CGRect(origin: .zero, size: targetSize))
+        }
+        return normalized.cgImage
+    }
+}
+
+private final class SpatialArtworkMotionObserver: ObservableObject {
+    @Published var parallax: CGSize = .zero
+
+    private let manager = CMMotionManager()
+    private var baseline: CMAcceleration?
+    private var smoothed = CGSize.zero
+    private var lastPublished = CGSize.zero
+    private var lastPublishTime = Date.distantPast
+
+    func start() {
+#if DEBUG
+        if let rawVector = ProcessInfo.processInfo.environment["FLIPMUSIC_SPATIAL_TEST_VECTOR"] {
+            let components = rawVector.split(separator: ",").compactMap { Double($0) }
+            if components.count == 2 {
+                parallax = CGSize(
+                    width: max(-1, min(1, components[0])),
+                    height: max(-1, min(1, components[1]))
+                )
+                return
+            }
+        }
+#endif
+        guard manager.isDeviceMotionAvailable, manager.isDeviceMotionActive == false else { return }
+        baseline = nil
+        smoothed = .zero
+        manager.deviceMotionUpdateInterval = 1.0 / 16.0
+        manager.startDeviceMotionUpdates(to: .main) { [weak self] deviceMotion, _ in
+            guard let self, let gravity = deviceMotion?.gravity else { return }
+            if baseline == nil {
+                baseline = gravity
+                return
+            }
+            guard let baseline else { return }
+
+            let target = CGSize(
+                width: max(-1, min(1, (gravity.x - baseline.x) * 3.6)),
+                height: max(-1, min(1, (gravity.y - baseline.y) * 3.6))
+            )
+            smoothed = CGSize(
+                width: smoothed.width * 0.82 + target.width * 0.18,
+                height: smoothed.height * 0.82 + target.height * 0.18
+            )
+
+            let delta = max(
+                abs(smoothed.width - lastPublished.width),
+                abs(smoothed.height - lastPublished.height)
+            )
+            let now = Date()
+            guard delta >= 0.024,
+                  now.timeIntervalSince(lastPublishTime) >= 1.0 / 12.0 else { return }
+            lastPublished = smoothed
+            lastPublishTime = now
+            parallax = smoothed
+        }
+    }
+
+    func stop() {
+        manager.stopDeviceMotionUpdates()
+        baseline = nil
+        smoothed = .zero
+        lastPublished = .zero
+        parallax = .zero
+    }
+}
+
+private struct FluidPlayerLeadingArtwork: View {
+    let song: DemoSong
+    @ObservedObject private var artworkCache = PlayerArtworkWarmupCache.shared
+
+    var body: some View {
+        let _ = artworkCache.revision
+        GeometryReader { proxy in
+            if let artworkImage = artworkCache.artwork(for: song) ?? song.artworkImage {
+                let sourceWidth = max(artworkImage.size.width, 1)
+                let sourceHeight = max(artworkImage.size.height, 1)
+                let scale = min(proxy.size.width / sourceWidth, proxy.size.height / sourceHeight)
+                let displayedWidth = sourceWidth * scale
+                let displayedHeight = sourceHeight * scale
+
+                Image(uiImage: artworkImage)
+                    .resizable()
+                    .frame(width: displayedWidth, height: displayedHeight)
+                    .position(x: displayedWidth / 2, y: displayedHeight / 2)
+            } else if let artworkURL = song.artworkURL,
+                      let url = URL(string: artworkURL) {
+                AsyncImage(url: url, transaction: Transaction(animation: nil)) { phase in
+                    if case let .success(image) = phase {
+                        image
+                            .resizable()
+                            .scaledToFit()
+                            .frame(
+                                width: proxy.size.width,
+                                height: proxy.size.height,
+                                alignment: .topLeading
+                            )
+                    } else {
+                        Color.clear
+                    }
+                }
+                .frame(
+                    width: proxy.size.width,
+                    height: proxy.size.height,
+                    alignment: .topLeading
+                )
+            }
+        }
+        .task(id: song.id) {
+            artworkCache.preload(songs: [song])
+        }
+    }
+}
+
+private struct FluidPlayerPage: View {
+    let song: DemoSong
+    let isPlaying: Bool
+
+    var body: some View {
+        let palette = PlayerImmersivePalette(accentColor: song.magicColor)
+
+        VStack(spacing: 0) {
+            Spacer(minLength: 0)
+
+            VStack(alignment: .leading, spacing: 16) {
+                HStack(spacing: 13) {
+                    RotatingPlayerArtwork(song: song, isPlaying: isPlaying)
+                        .frame(width: 48, height: 48)
+
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(song.title)
+                            .font(.title2.weight(.bold))
+                            .foregroundStyle(palette.primaryText)
+                            .lineLimit(2)
+                            .minimumScaleFactor(0.72)
+                            .multilineTextAlignment(.leading)
+
+                        Text(song.artist)
+                            .font(.body.weight(.medium))
+                            .foregroundStyle(palette.secondaryText)
+                            .lineLimit(1)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                FluidPlayerProgress(song: song)
+            }
+            .padding(.horizontal, 22)
+            .padding(.bottom, 18)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(song.title), \(song.artist)")
+        .accessibilityIdentifier("fluid-player-song-title")
+        .accessibilityValue(String(song.id))
+    }
+}
+
+private struct RotatingPlayerArtwork: View {
+    let song: DemoSong
+    let isPlaying: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 20.0, paused: !isPlaying || reduceMotion)) { _ in
+            let player = MPMusicPlayerController.systemMusicPlayer
+            let elapsed = max(0, player.currentPlaybackTime.isFinite ? player.currentPlaybackTime : 0)
+            let rotation = reduceMotion ? 0 : elapsed.truncatingRemainder(dividingBy: 12) / 12 * 360
+
+            SongArtworkLayer(song: song)
+                .frame(width: 48, height: 48)
+                .clipShape(Circle())
+                .overlay {
+                    Circle()
+                        .stroke(.white.opacity(0.24), lineWidth: 1)
+                }
+                .shadow(color: .black.opacity(0.30), radius: 8, y: 4)
+                .rotationEffect(.degrees(rotation))
+        }
+        .accessibilityLabel("专辑封面")
+        .accessibilityHidden(true)
+    }
+}
+
+private struct FluidPlayerProgress: View {
+    let song: DemoSong
+
+    var body: some View {
+        let palette = PlayerImmersivePalette(accentColor: song.magicColor)
+
+        TimelineView(.periodic(from: .now, by: 1)) { _ in
+            let player = MPMusicPlayerController.systemMusicPlayer
+            let elapsed = max(0, player.currentPlaybackTime.isFinite ? player.currentPlaybackTime : 0)
+            let duration = max(0, player.nowPlayingItem?.playbackDuration ?? song.mediaItem?.playbackDuration ?? 0)
+            let progress = duration > 0 ? min(max(elapsed / duration, 0), 1) : 0
+
+            VStack(spacing: 8) {
+                GeometryReader { proxy in
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(palette.accent.opacity(0.22))
+                        Capsule()
+                            .fill(palette.accent)
+                            .frame(width: proxy.size.width * progress)
+                    }
+                }
+                .frame(height: 3)
+
+                HStack {
+                    Text(formatTime(elapsed))
+                    Spacer()
+                    Text(duration > 0 ? "-\(formatTime(max(0, duration - elapsed)))" : "--:--")
+                }
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(palette.secondaryText.opacity(0.78))
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("播放进度")
+    }
+
+    private func formatTime(_ seconds: TimeInterval) -> String {
+        guard seconds.isFinite else { return "0:00" }
+        let wholeSeconds = max(0, Int(seconds.rounded(.down)))
+        return String(format: "%d:%02d", wholeSeconds / 60, wholeSeconds % 60)
+    }
+}
+
+private struct PlayerImmersivePalette {
+    let backgroundTop: Color
+    let backgroundMiddle: Color
+    let backgroundBottom: Color
+    let accent: Color
+    let primaryText: Color
+    let secondaryText: Color
+
+    init(accentColor: Color) {
+        let source = UIColor(songPalette: [accentColor])
+        var hue: CGFloat = 0
+        var saturation: CGFloat = 0
+        var brightness: CGFloat = 0
+        var alpha: CGFloat = 0
+        source.getHue(
+            &hue,
+            saturation: &saturation,
+            brightness: &brightness,
+            alpha: &alpha
+        )
+
+        let token = Self.tokenSet(
+            hue: hue * 360,
+            saturation: saturation,
+            brightness: brightness
+        )
+        let followsTheme = saturation >= 0.12 && token.isGray == false
+        let mixedPrimary = followsTheme ? token.primary.mixed(with: source, amount: 0.45) : token.primary
+        let mixedSecondary = followsTheme ? token.secondary.mixed(with: source, amount: 0.351) : token.secondary
+        let mixedProgress = followsTheme ? token.progress.mixed(with: source, amount: 0.306) : token.progress
+        let isLightCover = brightness > 0.58
+        let glassReference = UIColor(white: 0.16, alpha: 1)
+        let primary = mixedPrimary.ensuringContrast(against: glassReference, minimum: 4.8)
+        let secondary = mixedSecondary.ensuringContrast(against: glassReference, minimum: 4.5)
+        let progress = mixedProgress.ensuringContrast(against: glassReference, minimum: 3.2)
+
+        backgroundTop = Color(uiColor: isLightCover ? token.surface : UIColor(
+            hue: hue,
+            saturation: min(max(saturation * 0.72, 0.32), 0.78),
+            brightness: min(max(brightness * 0.28, 0.10), 0.22),
+            alpha: 1
+        ))
+        backgroundMiddle = Color(uiColor: token.surface.mixed(with: source, amount: 0.08))
+        backgroundBottom = Color(uiColor: token.surface)
+        accent = Color(uiColor: progress)
+        primaryText = Color(uiColor: primary)
+        secondaryText = Color(uiColor: secondary)
+    }
+
+    private struct TokenSet {
+        let surface: UIColor
+        let primary: UIColor
+        let secondary: UIColor
+        let progress: UIColor
+        let isGray: Bool
+    }
+
+    private enum Family {
+        case orange, yellow, lime, green, cyan, sky, blue, indigo, purple, rose, red, gray
+    }
+
+    private static func tokenSet(hue: CGFloat, saturation: CGFloat, brightness: CGFloat) -> TokenSet {
+        let family: Family
+        if saturation <= 0.03 || brightness <= 0.10 {
+            family = .gray
+        } else if saturation < 0.12 {
+            switch hue {
+            case 0..<35, 330...360: family = .orange
+            case 35..<105: family = .yellow
+            case 105..<190: family = .cyan
+            case 190..<245: family = .sky
+            case 245..<300: family = .indigo
+            default: family = .rose
+            }
+        } else {
+            switch hue {
+            case 0..<10, 346...360: family = .red
+            case 10..<30: family = .orange
+            case 30..<65: family = .yellow
+            case 65..<110: family = .lime
+            case 110..<165: family = .green
+            case 165..<190: family = .cyan
+            case 190..<210: family = .sky
+            case 210..<240: family = .blue
+            case 240..<270: family = .indigo
+            case 270..<310: family = .purple
+            default: family = .rose
+            }
+        }
+
+        let values: (UInt32, UInt32, UInt32, UInt32)
+        switch family {
+        case .orange: values = (0xFFFAF7, 0xEE6A0D, 0xDB6816, 0xFC7B54)
+        case .yellow: values = (0xFFFFF2, 0x80800D, 0xB3B31A, 0xA6AC3E)
+        case .lime: values = (0xF8FFF5, 0x47991F, 0x47B212, 0x73B054)
+        case .green: values = (0xF2FFFA, 0x008C59, 0x1AB37B, 0x43B58C)
+        case .cyan: values = (0xF0FDFF, 0x0F8799, 0x079CB2, 0x30C3DA)
+        case .sky: values = (0xF0FAFF, 0x0F6099, 0x1480CC, 0x64A5CE)
+        case .blue: values = (0xF0F5FF, 0x122DB2, 0x3D55CC, 0x4879D9)
+        case .indigo: values = (0xF5F0FF, 0x5C17E5, 0x8A5CE5, 0x9162EC)
+        case .purple: values = (0xFCF0FF, 0xAD14CC, 0xCF5CE5, 0xA93ECD)
+        case .rose: values = (0xFFF0FA, 0xCC0088, 0xE573BF, 0xD23192)
+        case .red: values = (0xFFF0F3, 0xB2001E, 0xE57386, 0xC9333B)
+        case .gray: values = (0xF7F7F7, 0x242424, 0x808080, 0x6B6C6D)
+        }
+        return TokenSet(
+            surface: UIColor(rgb: values.0),
+            primary: UIColor(rgb: values.1),
+            secondary: UIColor(rgb: values.2),
+            progress: UIColor(rgb: values.3),
+            isGray: family == .gray
+        )
+    }
 }
 
 private struct CarouselPlayerOverlay: View {
@@ -6373,9 +8042,7 @@ private struct PlayerPill: View {
         artworkOffset * 0.55
     }
 
-    private var renderedSong: DemoSong {
-        displayedSong ?? song
-    }
+    private var renderedSong: DemoSong { song }
 
     var body: some View {
         ZStack {
@@ -6410,7 +8077,6 @@ private struct PlayerPill: View {
             }
             .padding(.leading, 13)
             .padding(.trailing, 12)
-            .opacity(isPlayerCardVisible ? 0 : 1)
         }
         .frame(maxWidth: .infinity)
         .frame(height: 53)
@@ -6472,6 +8138,10 @@ private struct PlayerPill: View {
         .shadow(color: song.magicColor.opacity(0.16), radius: 20, y: 6)
         .shadow(color: .black.opacity(0.18), radius: 18, y: 9)
         .contentShape(RoundedRectangle(cornerRadius: 27))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(song.title), \(song.artist)")
+        .accessibilityIdentifier("bottom-player-song")
+        .accessibilityValue(String(song.id))
         .scaleEffect(isTouchActive ? 1.045 : 1)
         .gesture(
             DragGesture(minimumDistance: 0, coordinateSpace: .local)
@@ -6494,12 +8164,16 @@ private struct PlayerPill: View {
             playerPillFrame = frame
         }
         .onAppear {
-            if displayedSong == nil {
-                displayedSong = song
-            }
+            displayedSong = song
+            incomingSong = nil
+            flipProgress = 0
         }
         .onChange(of: song.id) { _, _ in
-            runSongFlip(to: song)
+            contentFlipTask?.cancel()
+            contentFlipTask = nil
+            displayedSong = song
+            incomingSong = nil
+            flipProgress = 0
         }
         .onDisappear {
             pendingSwipeTask?.cancel()
@@ -6507,7 +8181,6 @@ private struct PlayerPill: View {
             contentFlipTask?.cancel()
             contentFlipTask = nil
         }
-        .opacity(isPlayerCardVisible ? 0 : 1)
     }
 
     private func updateTouchInteraction(_ value: DragGesture.Value) {
@@ -7645,17 +9318,63 @@ private extension UIImage {
         }
     }
 
-    var magicAverageColor: UIColor? {
-        let size = CGSize(width: 12, height: 12)
+    var bottomAverageColor: UIColor? {
+        let side = 24
         let colorSpace = CGColorSpaceCreateDeviceRGB()
-        var pixels = [UInt8](repeating: 0, count: Int(size.width * size.height) * 4)
+        var pixels = [UInt8](repeating: 0, count: side * side * 4)
+        guard let context = CGContext(
+            data: &pixels,
+            width: side,
+            height: side,
+            bitsPerComponent: 8,
+            bytesPerRow: side * 4,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+
+        UIGraphicsPushContext(context)
+        let target = CGSize(width: side, height: side)
+        let scale = max(target.width / max(size.width, 1), target.height / max(size.height, 1))
+        let drawSize = CGSize(width: size.width * scale, height: size.height * scale)
+        draw(in: CGRect(
+            x: (target.width - drawSize.width) / 2,
+            y: (target.height - drawSize.height) / 2,
+            width: drawSize.width,
+            height: drawSize.height
+        ))
+        UIGraphicsPopContext()
+
+        var red: CGFloat = 0
+        var green: CGFloat = 0
+        var blue: CGFloat = 0
+        var count: CGFloat = 0
+        let firstRow = Int(CGFloat(side) * 0.64)
+        for row in firstRow..<side {
+            for column in 0..<side {
+                let index = (row * side + column) * 4
+                guard pixels[index + 3] > 16 else { continue }
+                red += CGFloat(pixels[index]) / 255
+                green += CGFloat(pixels[index + 1]) / 255
+                blue += CGFloat(pixels[index + 2]) / 255
+                count += 1
+            }
+        }
+        guard count > 0 else { return nil }
+        return UIColor(red: red / count, green: green / count, blue: blue / count, alpha: 1)
+    }
+
+    var magicAverageColor: UIColor? {
+        let side = 64
+        let size = CGSize(width: side, height: side)
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        var pixels = [UInt8](repeating: 0, count: side * side * 4)
 
         guard let context = CGContext(
             data: &pixels,
-            width: Int(size.width),
-            height: Int(size.height),
+            width: side,
+            height: side,
             bitsPerComponent: 8,
-            bytesPerRow: Int(size.width) * 4,
+            bytesPerRow: side * 4,
             space: colorSpace,
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
         ) else {
@@ -7663,39 +9382,169 @@ private extension UIImage {
         }
 
         UIGraphicsPushContext(context)
-        draw(in: CGRect(origin: .zero, size: size))
+        let scale = max(size.width / max(self.size.width, 1), size.height / max(self.size.height, 1))
+        let drawSize = CGSize(width: self.size.width * scale, height: self.size.height * scale)
+        draw(in: CGRect(
+            x: (size.width - drawSize.width) / 2,
+            y: (size.height - drawSize.height) / 2,
+            width: drawSize.width,
+            height: drawSize.height
+        ))
         UIGraphicsPopContext()
 
-        var red: CGFloat = 0
-        var green: CGFloat = 0
-        var blue: CGFloat = 0
-        var weightTotal: CGFloat = 0
+        let bucketCount = 12
+        let totalBuckets = bucketCount * bucketCount * bucketCount
+        var counts = [Int](repeating: 0, count: totalBuckets)
+        var reds = [CGFloat](repeating: 0, count: totalBuckets)
+        var greens = [CGFloat](repeating: 0, count: totalBuckets)
+        var blues = [CGFloat](repeating: 0, count: totalBuckets)
 
         for index in stride(from: 0, to: pixels.count, by: 4) {
+            guard pixels[index + 3] > 16 else { continue }
             let r = CGFloat(pixels[index]) / 255
             let g = CGFloat(pixels[index + 1]) / 255
             let b = CGFloat(pixels[index + 2]) / 255
-            let brightness = max(r, g, b)
-            let saturation = brightness == 0 ? 0 : (brightness - min(r, g, b)) / brightness
-            let weight = max(0.18, saturation) * max(0.22, min(brightness, 0.92))
-
-            red += r * weight
-            green += g * weight
-            blue += b * weight
-            weightTotal += weight
+            let redBucket = min(Int(pixels[index]) / 24, bucketCount - 1)
+            let greenBucket = min(Int(pixels[index + 1]) / 24, bucketCount - 1)
+            let blueBucket = min(Int(pixels[index + 2]) / 24, bucketCount - 1)
+            let key = redBucket * bucketCount * bucketCount + greenBucket * bucketCount + blueBucket
+            counts[key] += 1
+            reds[key] += r
+            greens[key] += g
+            blues[key] += b
         }
 
-        guard weightTotal > 0 else { return nil }
+        let samples = counts.indices.compactMap { key -> ArtworkColorSample? in
+            let count = counts[key]
+            guard count > 0 else { return nil }
+            let red = reds[key] / CGFloat(count)
+            let green = greens[key] / CGFloat(count)
+            let blue = blues[key] / CGFloat(count)
+            var hue: CGFloat = 0
+            var saturation: CGFloat = 0
+            var brightness: CGFloat = 0
+            UIColor(red: red, green: green, blue: blue, alpha: 1).getHue(
+                &hue,
+                saturation: &saturation,
+                brightness: &brightness,
+                alpha: nil
+            )
+            return ArtworkColorSample(
+                count: count,
+                red: red,
+                green: green,
+                blue: blue,
+                hue: hue,
+                saturation: saturation,
+                brightness: brightness
+            )
+        }
+        guard let largest = samples.max(by: { $0.count < $1.count }) else { return nil }
+        let totalPixels = max(samples.reduce(0) { $0 + $1.count }, 1)
+        let eligible = samples.filter { $0.saturation >= 0.12 && $0.brightness >= 0.12 }
+
+        var winningFamily: [ArtworkColorSample] = []
+        var winningScore: CGFloat = 0
+        var winningCount = 0
+        for center in eligible {
+            let family = eligible.filter {
+                let rawDistance = abs($0.hue - center.hue)
+                return min(rawDistance, 1 - rawDistance) * 360 <= 36
+            }
+            let familyCount = family.reduce(0) { $0 + $1.count }
+            guard CGFloat(familyCount) / CGFloat(totalPixels) >= 0.08 else { continue }
+            let score = family.reduce(CGFloat.zero) { $0 + $1.visualScore }
+            if score > winningScore {
+                winningFamily = family
+                winningScore = score
+                winningCount = familyCount
+            }
+        }
+
+        let softBaseIsPreferred = largest.saturation > 0.03
+            && largest.saturation < 0.12
+            && largest.brightness > 0.60
+            && CGFloat(largest.count) / CGFloat(totalPixels) >= 0.08
+            && CGFloat(largest.count) >= CGFloat(winningCount) * 1.6
+        if softBaseIsPreferred || winningFamily.isEmpty {
+            return UIColor(red: largest.red, green: largest.green, blue: largest.blue, alpha: 1)
+        }
+
+        let weight = max(winningFamily.reduce(CGFloat.zero) { $0 + $1.visualScore }, 0.001)
         return UIColor(
-            red: min(red / weightTotal * 1.16, 1),
-            green: min(green / weightTotal * 1.16, 1),
-            blue: min(blue / weightTotal * 1.16, 1),
+            red: winningFamily.reduce(CGFloat.zero) { $0 + $1.red * $1.visualScore } / weight,
+            green: winningFamily.reduce(CGFloat.zero) { $0 + $1.green * $1.visualScore } / weight,
+            blue: winningFamily.reduce(CGFloat.zero) { $0 + $1.blue * $1.visualScore } / weight,
             alpha: 1
         )
     }
 }
 
 private extension UIColor {
+    convenience init(rgb: UInt32) {
+        self.init(
+            red: CGFloat((rgb >> 16) & 0xFF) / 255,
+            green: CGFloat((rgb >> 8) & 0xFF) / 255,
+            blue: CGFloat(rgb & 0xFF) / 255,
+            alpha: 1
+        )
+    }
+
+    func mixed(with other: UIColor, amount: CGFloat) -> UIColor {
+        var r1: CGFloat = 0
+        var g1: CGFloat = 0
+        var b1: CGFloat = 0
+        var a1: CGFloat = 0
+        var r2: CGFloat = 0
+        var g2: CGFloat = 0
+        var b2: CGFloat = 0
+        var a2: CGFloat = 0
+        guard getRed(&r1, green: &g1, blue: &b1, alpha: &a1),
+              other.getRed(&r2, green: &g2, blue: &b2, alpha: &a2) else { return self }
+        let t = min(max(amount, 0), 1)
+        return UIColor(
+            red: r1 + (r2 - r1) * t,
+            green: g1 + (g2 - g1) * t,
+            blue: b1 + (b2 - b1) * t,
+            alpha: a1 + (a2 - a1) * t
+        )
+    }
+
+    func ensuringContrast(against background: UIColor, minimum: CGFloat) -> UIColor {
+        guard contrastRatio(with: background) < minimum else { return self }
+        for step in 1...10 {
+            let amount = CGFloat(step) * 0.07
+            let darker = mixed(with: .black, amount: amount)
+            let lighter = mixed(with: .white, amount: amount)
+            let darkRatio = darker.contrastRatio(with: background)
+            let lightRatio = lighter.contrastRatio(with: background)
+            if max(darkRatio, lightRatio) >= minimum {
+                return darkRatio >= lightRatio ? darker : lighter
+            }
+        }
+        let blackRatio = UIColor.black.contrastRatio(with: background)
+        let whiteRatio = UIColor.white.contrastRatio(with: background)
+        return blackRatio >= whiteRatio ? .black : .white
+    }
+
+    private func contrastRatio(with other: UIColor) -> CGFloat {
+        let lighter = max(relativeLuminance, other.relativeLuminance)
+        let darker = min(relativeLuminance, other.relativeLuminance)
+        return (lighter + 0.05) / (darker + 0.05)
+    }
+
+    private var relativeLuminance: CGFloat {
+        var red: CGFloat = 0
+        var green: CGFloat = 0
+        var blue: CGFloat = 0
+        var alpha: CGFloat = 0
+        guard getRed(&red, green: &green, blue: &blue, alpha: &alpha) else { return 0 }
+        func linear(_ value: CGFloat) -> CGFloat {
+            value <= 0.04045 ? value / 12.92 : pow((value + 0.055) / 1.055, 2.4)
+        }
+        return linear(red) * 0.2126 + linear(green) * 0.7152 + linear(blue) * 0.0722
+    }
+
     convenience init(songPalette colors: [Color]) {
         let resolved = colors.first?.resolve(in: EnvironmentValues()) ?? Color.Resolved(red: 0.12, green: 0.12, blue: 0.14)
         self.init(
@@ -8205,6 +10054,8 @@ private struct HomeInteractiveSongSquare: View {
 
 private struct SongArtworkLayer: View {
     let song: DemoSong
+    var contentMode: ContentMode = .fill
+    var alignment: Alignment = .center
     @ObservedObject private var artworkCache = PlayerArtworkWarmupCache.shared
 
     var body: some View {
@@ -8213,14 +10064,14 @@ private struct SongArtworkLayer: View {
         if let artworkImage = artworkCache.artwork(for: song) ?? song.artworkImage {
             Image(uiImage: artworkImage)
                 .resizable()
-                .aspectRatio(contentMode: .fill)
+                .aspectRatio(contentMode: contentMode)
         } else if let artworkURL = song.artworkURL,
                   let url = URL(string: artworkURL) {
             AsyncImage(url: url, transaction: Transaction(animation: nil)) { phase in
                 if case let .success(image) = phase {
                     image
                         .resizable()
-                        .aspectRatio(contentMode: .fill)
+                        .aspectRatio(contentMode: contentMode)
                 } else {
                     Color.clear
                 }
@@ -8229,6 +10080,7 @@ private struct SongArtworkLayer: View {
             Color.clear
         }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: alignment)
         .task(id: song.id) {
             artworkCache.preload(songs: [song])
         }

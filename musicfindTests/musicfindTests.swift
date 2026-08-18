@@ -89,3 +89,88 @@ struct PlaybackCoreStateTests {
         #expect(state.phase == .playing)
     }
 }
+
+struct PlaylistCuratorTests {
+    private let referenceDate = Date(timeIntervalSince1970: 1_800_000_000)
+
+    @Test("Curator returns the requested number without duplicate songs")
+    func requestedCountAndDeduplication() {
+        let tracks = (0..<40).map { index in
+            seed(id: index, artist: "Artist \(index % 10)", playCount: 40 - index, energy: Double(index % 10) / 10)
+        } + [seed(id: 100, title: "Song 0", artist: "Artist 0", playCount: 999, energy: 0.5)]
+
+        let result = PlaylistCurator.curate(tracks, requestedCount: 25, referenceDate: referenceDate)
+
+        #expect(result.tracks.count == 25)
+        #expect(Set(result.tracks.map(\.id)).count == 25)
+        #expect(result.sections.count == 4)
+    }
+
+    @Test("Curator keeps one artist from dominating when alternatives exist")
+    func artistDiversity() {
+        let dominant = (0..<20).map {
+            seed(id: $0, artist: "Same Artist", playCount: 200 - $0, energy: 0.6)
+        }
+        let alternatives = (20..<55).map {
+            seed(id: $0, artist: "Artist \($0)", playCount: 30, energy: Double($0 % 10) / 10)
+        }
+
+        let result = PlaylistCurator.curate(dominant + alternatives, requestedCount: 25, referenceDate: referenceDate)
+        let dominantCount = result.tracks.filter { $0.artist == "Same Artist" }.count
+
+        #expect(dominantCount <= 2)
+    }
+
+    @Test("The lift section is more energetic than the deep section")
+    func fourActEnergyShape() {
+        let tracks = (0..<60).map { index in
+            seed(id: index, artist: "Artist \(index)", playCount: 20, energy: Double(index) / 59)
+        }
+
+        let result = PlaylistCurator.curate(tracks, requestedCount: 50, referenceDate: referenceDate)
+        let lift = result.sections.first { $0.kind == .lift }?.tracks ?? []
+        let deep = result.sections.first { $0.kind == .deep }?.tracks ?? []
+        let liftAverage = lift.map(\.energy).reduce(0, +) / Double(lift.count)
+        let deepAverage = deep.map(\.energy).reduce(0, +) / Double(deep.count)
+
+        #expect(liftAverage > deepAverage)
+    }
+
+    @Test("Frequently and recently played songs are preferred")
+    func playbackPreference() {
+        let favorites = (0..<8).map {
+            PlaylistSeedTrack(
+                id: $0,
+                title: "Favorite \($0)",
+                artist: "Favorite Artist \($0)",
+                playCount: 80,
+                lastPlayedDate: referenceDate.addingTimeInterval(-Double($0) * 3_600),
+                energy: 0.5
+            )
+        }
+        let unplayed = (8..<50).map {
+            seed(id: $0, artist: "Other Artist \($0)", playCount: 0, energy: 0.5)
+        }
+
+        let result = PlaylistCurator.curate(favorites + unplayed, requestedCount: 25, referenceDate: referenceDate)
+
+        #expect(Set(favorites.map(\.id)).isSubset(of: Set(result.tracks.map(\.id))))
+    }
+
+    private func seed(
+        id: Int,
+        title: String? = nil,
+        artist: String,
+        playCount: Int,
+        energy: Double
+    ) -> PlaylistSeedTrack {
+        PlaylistSeedTrack(
+            id: id,
+            title: title ?? "Song \(id)",
+            artist: artist,
+            playCount: playCount,
+            lastPlayedDate: nil,
+            energy: energy
+        )
+    }
+}
