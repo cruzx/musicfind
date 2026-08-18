@@ -183,7 +183,11 @@ struct ContentView: View {
                 .zIndex(1)
 
             if isPlaybackVisuallyActive {
-                MusicSparkleField(song: playerDisplaySong, preference: musicConnector.moodPreference)
+                MusicSparkleField(
+                    song: playerDisplaySong,
+                    preference: musicConnector.moodPreference,
+                    isPaused: isPlayerCardVisible
+                )
                     .frame(width: proxy.size.width, height: min(proxy.size.height * 0.56, 520))
                     .offset(y: 74)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
@@ -200,7 +204,7 @@ struct ContentView: View {
                         if musicConnector.isPlaying {
                             HeaderNowPlayingBadge(song: playerDisplaySong)
                         } else {
-                            GreetingBadge(mood: currentTimeMood)
+                            GreetingBadge(mood: currentTimeMood, isPaused: isPlayerCardVisible)
                         }
 
                     }
@@ -243,6 +247,8 @@ struct ContentView: View {
                                 isPlaying: musicConnector.isPlaying,
                                 isContentVisible: isPlayerCardContentVisible,
                                 onClose: hidePlayerCard,
+                                onSwipeDismiss: completePlayerCardDismiss,
+                                onTogglePlayback: toggleCurrentPlayback,
                                 onSongChange: { song in
                                     musicConnector.queuePlaybackPreservingOrder(
                                         for: song,
@@ -361,7 +367,9 @@ struct ContentView: View {
         .onChange(of: isPlayerCardVisible) { _, isVisible in
             if isVisible {
                 stopHomeDrift()
+                shakeObserver.stop()
             } else if isHomeSurfaceVisible {
+                shakeObserver.start()
                 scheduleHomeIdleDrift()
             }
         }
@@ -536,17 +544,29 @@ struct ContentView: View {
     private func hidePlayerCard() {
         guard isPlayerCardVisible else { return }
 
-        withAnimation(.easeOut(duration: 0.12)) {
+        withAnimation(.easeOut(duration: 0.18)) {
             isPlayerCardDismissing = true
+            isPlayerCardContentVisible = false
         }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
+            completePlayerCardDismiss()
+        }
+    }
+
+    private func completePlayerCardDismiss() {
+        guard isPlayerCardVisible else { return }
+
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
             isPlayerCardVisible = false
             isPlayerCardContentVisible = false
-            isPlayerCardDismissing = false
-            playerCardPlaybackSongs = []
             activeTab = .home
         }
+
+        isPlayerCardDismissing = false
+        playerCardPlaybackSongs = []
     }
 
     private func songsForColumn(_ column: Int, columnCount: Int = 4) -> [DemoSong] {
@@ -1608,9 +1628,10 @@ private enum HomeTimeMood: Equatable {
 
 private struct GreetingBadge: View {
     let mood: HomeTimeMood
+    let isPaused: Bool
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 12.0)) { timeline in
+        TimelineView(.animation(minimumInterval: 1.0 / 12.0, paused: isPaused)) { timeline in
             let phase = timeline.date.timeIntervalSinceReferenceDate
             let float = sin(phase * 1.6)
 
@@ -5691,6 +5712,7 @@ private struct BottomNavigationBar: View {
 private struct MusicSparkleField: View {
     let song: DemoSong
     let preference: MusicMoodPreference
+    let isPaused: Bool
     @State private var particles: [MusicParticleSpec] = []
 
     private enum ParticleMood {
@@ -5754,7 +5776,7 @@ private struct MusicSparkleField: View {
     }
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 12.0, paused: false)) { timeline in
+        TimelineView(.animation(minimumInterval: 1.0 / 12.0, paused: isPaused)) { timeline in
             Canvas { context, size in
                 let time = timeline.date.timeIntervalSinceReferenceDate
                 let travelHeight = size.height * 1.02
@@ -5981,11 +6003,18 @@ private struct MusicParticleSpec {
 }
 
 private struct FluidPlayerOverlay: View {
+    private enum SwipeAxis {
+        case horizontal
+        case vertical
+    }
+
     let songs: [DemoSong]
     let nowPlaying: DemoSong
     let isPlaying: Bool
     let isContentVisible: Bool
     let onClose: () -> Void
+    let onSwipeDismiss: () -> Void
+    let onTogglePlayback: () -> Void
     let onSongChange: (DemoSong) -> Void
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -5994,7 +6023,9 @@ private struct FluidPlayerOverlay: View {
     @State private var transitionProgress: CGFloat = 0
     @State private var transitionDirection: CGFloat = 1
     @State private var dragOffset: CGFloat = 0
+    @State private var swipeAxis: SwipeAxis?
     @State private var transitionTask: Task<Void, Never>?
+    @State private var playbackHandoffTask: Task<Void, Never>?
     @StateObject private var spatialMotion = SpatialArtworkMotionObserver()
 
     private var transitionDuration: Double { reduceMotion ? 0.22 : 0.56 }
@@ -6016,7 +6047,6 @@ private struct FluidPlayerOverlay: View {
         guard reduceMotion == false, isTransitioning else { return 1 }
         return 1 - CGFloat(sin(Double(transitionProgress) * .pi)) * 0.035
     }
-
     var body: some View {
         GeometryReader { proxy in
             let topInset = max(proxy.safeAreaInsets.top, 8)
@@ -6024,6 +6054,7 @@ private struct FluidPlayerOverlay: View {
                 FluidPlayerBackdrop(
                     song: currentSong,
                     isPlaying: isPlaying,
+                    isMotionEnabled: !isTransitioning,
                     parallax: spatialParallax
                 )
 
@@ -6031,6 +6062,7 @@ private struct FluidPlayerOverlay: View {
                     FluidPlayerBackdrop(
                         song: targetSong,
                         isPlaying: isPlaying,
+                        isMotionEnabled: false,
                         parallax: spatialParallax
                     )
                         .mask {
@@ -6064,11 +6096,25 @@ private struct FluidPlayerOverlay: View {
                     .allowsHitTesting(false)
                 }
 
+                if !isPlaying {
+                    RoundedPlayTriangle(cornerRadius: 8)
+                        .fill(.white.opacity(0.60))
+                        .frame(width: 58, height: 68)
+                        .shadow(color: .black.opacity(0.22), radius: 10, y: 4)
+                        .allowsHitTesting(false)
+                        .zIndex(3)
+                }
+
                 Rectangle()
                     .fill(.white.opacity(0.001))
                     .frame(width: proxy.size.width, height: proxy.size.height)
                     .contentShape(Rectangle())
                     .gesture(playerSwipeGesture())
+                    .simultaneousGesture(
+                        TapGesture().onEnded {
+                            handlePlaybackTap()
+                        }
+                    )
                     .position(x: proxy.size.width / 2, y: proxy.size.height / 2)
                     .accessibilityHidden(true)
 
@@ -6090,6 +6136,16 @@ private struct FluidPlayerOverlay: View {
             .contentShape(Rectangle())
         }
         .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .background {
+            PlayerCardGlassAura(song: currentSong)
+        }
+        .overlay {
+            PlayerCardGlassSheen(
+                song: currentSong,
+                highlightAngle: edgeHighlightAngle
+            )
+            .allowsHitTesting(false)
+        }
         .overlay {
             RoundedRectangle(cornerRadius: 24, style: .continuous)
                 .stroke(
@@ -6154,13 +6210,9 @@ private struct FluidPlayerOverlay: View {
             syncCurrentIndex()
             preloadNearbyArtwork()
         }
-        .onChange(of: songs.map(\.id)) { _, _ in
-            guard !isTransitioning else { return }
-            syncCurrentIndex()
-            preloadNearbyArtwork()
-        }
         .onDisappear {
             transitionTask?.cancel()
+            playbackHandoffTask?.cancel()
             spatialMotion.stop()
         }
         .onChange(of: reduceMotion) { _, isReduced in
@@ -6213,17 +6265,51 @@ private struct FluidPlayerOverlay: View {
     }
 
     private func playerSwipeGesture() -> some Gesture {
-        DragGesture(minimumDistance: 12, coordinateSpace: .local)
+        DragGesture(minimumDistance: 14, coordinateSpace: .local)
             .onChanged { value in
                 guard !isTransitioning else { return }
                 let horizontal = value.translation.width
-                guard abs(horizontal) > abs(value.translation.height) * 1.15 else { return }
+                let vertical = value.translation.height
+                if swipeAxis == nil {
+                    swipeAxis = abs(horizontal) > abs(vertical) * 1.25 ? .horizontal : .vertical
+                }
+                if swipeAxis == .vertical {
+                    dragOffset = 0
+                    return
+                }
                 dragOffset = resistedDrag(horizontal)
             }
             .onEnded { value in
+                defer { swipeAxis = nil }
                 guard !isTransitioning else { return }
+                if swipeAxis == .vertical {
+                    dragOffset = 0
+                    finishDismissDrag(value)
+                    return
+                }
+                guard swipeAxis == .horizontal else {
+                    dragOffset = 0
+                    return
+                }
                 finishDrag(value)
             }
+    }
+
+    private func finishDismissDrag(_ value: DragGesture.Value) {
+        let translation = value.translation.height
+        let predicted = value.predictedEndTranslation.height
+        guard translation > 92 || predicted > 170 else {
+            return
+        }
+
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        onSwipeDismiss()
+    }
+
+    private func handlePlaybackTap() {
+        guard !isTransitioning else { return }
+        onTogglePlayback()
+        UIImpactFeedbackGenerator(style: .light).impactOccurred(intensity: 0.65)
     }
 
     private func finishDrag(_ value: DragGesture.Value) {
@@ -6252,16 +6338,22 @@ private struct FluidPlayerOverlay: View {
 
         let song = songs[nextIndex]
         transitionTask?.cancel()
+        playbackHandoffTask?.cancel()
+        spatialMotion.pause()
         transitionDirection = step >= 0 ? 1 : -1
         targetIndex = nextIndex
         transitionProgress = 0
-        PlayerArtworkWarmupCache.shared.preload(songs: [song])
         UIImpactFeedbackGenerator(style: .medium).impactOccurred(intensity: 0.72)
-
-        onSongChange(song)
 
         withAnimation(.timingCurve(0.16, 0.72, 0.18, 1, duration: transitionDuration)) {
             transitionProgress = 1
+        }
+
+        // Commit the first transition frame before MusicPlayer publishes queue changes.
+        playbackHandoffTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(32))
+            guard !Task.isCancelled, targetIndex == nextIndex else { return }
+            onSongChange(song)
         }
 
         transitionTask = Task { @MainActor in
@@ -6276,6 +6368,9 @@ private struct FluidPlayerOverlay: View {
                 dragOffset = 0
             }
             preloadNearbyArtwork()
+            if reduceMotion == false {
+                spatialMotion.start()
+            }
         }
     }
 
@@ -6326,25 +6421,23 @@ private struct FluidSwipeMask: View {
     let direction: CGFloat
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: progress <= 0 || progress >= 1)) { timeline in
-            let time = timeline.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 120)
-            Rectangle()
-                .fill(.white)
-                .colorEffect(
-                    ShaderLibrary.fluidSwipeMask(
-                        .float2(Float(size.width), Float(size.height)),
-                        .float(Float(progress)),
-                        .float(Float(direction)),
-                        .float(Float(time))
-                    )
+        Rectangle()
+            .fill(.white)
+            .colorEffect(
+                ShaderLibrary.fluidSwipeMask(
+                    .float2(Float(size.width), Float(size.height)),
+                    .float(Float(progress)),
+                    .float(Float(direction)),
+                    .float(Float(progress * 2.4))
                 )
-        }
+            )
     }
 }
 
 private struct FluidPlayerBackdrop: View {
     let song: DemoSong
     let isPlaying: Bool
+    let isMotionEnabled: Bool
     let parallax: CGSize
 
     var body: some View {
@@ -6358,6 +6451,9 @@ private struct FluidPlayerBackdrop: View {
                     .frame(width: proxy.size.width, height: artworkHeight)
                     .scaleEffect(1.05)
                     .offset(x: parallax.width * 7, y: parallax.height * 5)
+                    .saturation(1.13)
+                    .contrast(1.075)
+                    .brightness(0.008)
                     .clipped()
                     .mask {
                         LinearGradient(
@@ -6374,10 +6470,6 @@ private struct FluidPlayerBackdrop: View {
                         )
                     }
 
-                Rectangle()
-                    .fill(.ultraThinMaterial)
-                    .opacity(0.10)
-
                 VStack(spacing: 0) {
                     Spacer(minLength: 0)
 
@@ -6385,15 +6477,15 @@ private struct FluidPlayerBackdrop: View {
                         .fill(.ultraThinMaterial)
                         .overlay {
                             Color.black
-                                .opacity(0.82)
+                                .opacity(0.64)
                         }
                         .overlay {
                             LinearGradient(
                                 colors: [
-                                    .white.opacity(0.018),
-                                    palette.accent.opacity(0.055),
-                                    .white.opacity(0.035),
-                                    .clear
+                                    .white.opacity(0.055),
+                                    palette.accent.opacity(0.105),
+                                    .white.opacity(0.050),
+                                    .black.opacity(0.04)
                                 ],
                                 startPoint: .topLeading,
                                 endPoint: .bottomTrailing
@@ -6418,14 +6510,14 @@ private struct FluidPlayerBackdrop: View {
                         .frame(height: proxy.size.height * 0.60)
                 }
 
-                Rectangle()
-                    .fill(.ultraThinMaterial)
-                    .opacity(0.025)
-
                 VStack(spacing: 0) {
                     Spacer(minLength: 0)
 
-                    PlayerPillRhythmLights(song: song, isPlaying: isPlaying)
+                    PlayerPillRhythmLights(
+                        song: song,
+                        isPlaying: isPlaying,
+                        isMotionEnabled: isMotionEnabled
+                    )
                         .frame(width: proxy.size.width + 36, height: 104)
                         .opacity(0.78)
                         .mask {
@@ -6447,6 +6539,60 @@ private struct FluidPlayerBackdrop: View {
             }
             .clipped()
         }
+    }
+}
+
+private struct PlayerCardGlassSheen: View {
+    let song: DemoSong
+    let highlightAngle: Angle
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 24, style: .continuous)
+
+        ZStack {
+            shape
+                .inset(by: 1.2)
+                .stroke(
+                    AngularGradient(
+                        colors: [
+                            .white.opacity(0.72),
+                            .white.opacity(0.10),
+                            song.magicColor.opacity(0.46),
+                            .white.opacity(0.06),
+                            .white.opacity(0.38),
+                            .white.opacity(0.72)
+                        ],
+                        center: .center,
+                        angle: highlightAngle
+                    ),
+                    lineWidth: 1.1
+                )
+                .blendMode(.screen)
+
+            shape
+                .inset(by: 3.2)
+                .stroke(.white.opacity(0.075), lineWidth: 0.7)
+        }
+        .clipShape(shape)
+    }
+}
+
+private struct PlayerCardGlassAura: View {
+    let song: DemoSong
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 25, style: .continuous)
+                .stroke(.white.opacity(0.14), lineWidth: 3)
+                .blur(radius: 10)
+
+            RoundedRectangle(cornerRadius: 25, style: .continuous)
+                .stroke(song.magicColor.opacity(0.23), lineWidth: 9)
+                .blur(radius: 24)
+        }
+        .padding(-7)
+        .opacity(0.82)
+        .allowsHitTesting(false)
     }
 }
 
@@ -6812,8 +6958,8 @@ private final class SpatialArtworkMotionObserver: ObservableObject {
 #endif
         guard manager.isDeviceMotionAvailable, manager.isDeviceMotionActive == false else { return }
         baseline = nil
-        smoothed = .zero
-        manager.deviceMotionUpdateInterval = 1.0 / 16.0
+        smoothed = parallax
+        manager.deviceMotionUpdateInterval = 1.0 / 12.0
         manager.startDeviceMotionUpdates(to: .main) { [weak self] deviceMotion, _ in
             guard let self, let gravity = deviceMotion?.gravity else { return }
             if baseline == nil {
@@ -6842,6 +6988,11 @@ private final class SpatialArtworkMotionObserver: ObservableObject {
             lastPublishTime = now
             parallax = smoothed
         }
+    }
+
+    func pause() {
+        manager.stopDeviceMotionUpdates()
+        baseline = nil
     }
 
     func stop() {
@@ -6950,9 +7101,8 @@ private struct RotatingPlayerArtwork: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 20.0, paused: !isPlaying || reduceMotion)) { _ in
-            let player = MPMusicPlayerController.systemMusicPlayer
-            let elapsed = max(0, player.currentPlaybackTime.isFinite ? player.currentPlaybackTime : 0)
+        TimelineView(.animation(minimumInterval: 1.0 / 20.0, paused: !isPlaying || reduceMotion)) { timeline in
+            let elapsed = timeline.date.timeIntervalSinceReferenceDate
             let rotation = reduceMotion ? 0 : elapsed.truncatingRemainder(dividingBy: 12) / 12 * 360
 
             SongArtworkLayer(song: song)
@@ -7698,7 +7848,7 @@ private struct RoundedPlayTriangle: Shape {
         ]
 
         var path = Path()
-        let radius = max(0, min(cornerRadius, min(rect.width, rect.height) * 0.12))
+        let radius = max(0, min(cornerRadius, min(rect.width, rect.height) * 0.45))
 
         func point(from start: CGPoint, to end: CGPoint, distance: CGFloat) -> CGPoint {
             let dx = end.x - start.x
@@ -8046,7 +8196,12 @@ private struct PlayerPill: View {
 
     var body: some View {
         ZStack {
-            PlayerPillGlassBackground(song: song, isActive: isActive, isPlaying: isPlaying)
+            PlayerPillGlassBackground(
+                song: song,
+                isActive: isActive,
+                isPlaying: isPlaying,
+                isMotionEnabled: !isPlayerCardVisible
+            )
 
             HStack(spacing: 10) {
                 PlayerPillFlippingContent(
@@ -8054,7 +8209,7 @@ private struct PlayerPill: View {
                     incomingSong: incomingSong,
                     flipProgress: flipProgress,
                     flipDirection: flipDirection,
-                    isPlaying: isPlaying,
+                    isPlaying: isPlaying && !isPlayerCardVisible,
                     isPlaybackLoading: isPlaybackLoading,
                     swipeOffset: contentSwipeOffset,
                     dragFade: isTextVisible ? max(0.20, 1 - abs(boundedDragOffset) / 120) : 0
@@ -8538,6 +8693,7 @@ private struct PlayerPillGlassBackground: View {
     let song: DemoSong
     let isActive: Bool
     let isPlaying: Bool
+    let isMotionEnabled: Bool
 
     var body: some View {
         RoundedRectangle(cornerRadius: 27, style: .continuous)
@@ -8660,12 +8816,21 @@ private struct PlayerPillGlassBackground: View {
                     .blendMode(.screen)
             }
             .overlay {
-                PlayerPillOrbitingRimLight(song: song, isPlaying: isPlaying, isActive: isActive)
+                PlayerPillOrbitingRimLight(
+                    song: song,
+                    isPlaying: isPlaying,
+                    isActive: isActive,
+                    isMotionEnabled: isMotionEnabled
+                )
                     .clipShape(RoundedRectangle(cornerRadius: 27, style: .continuous))
                     .allowsHitTesting(false)
             }
             .overlay(alignment: .bottom) {
-                PlayerPillRhythmLights(song: song, isPlaying: isPlaying)
+                PlayerPillRhythmLights(
+                    song: song,
+                    isPlaying: isPlaying,
+                    isMotionEnabled: isMotionEnabled
+                )
                     .clipShape(RoundedRectangle(cornerRadius: 27, style: .continuous))
                     .allowsHitTesting(false)
             }
@@ -8676,9 +8841,10 @@ private struct PlayerPillOrbitingRimLight: View {
     let song: DemoSong
     let isPlaying: Bool
     let isActive: Bool
+    let isMotionEnabled: Bool
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 18.0)) { timeline in
+        TimelineView(.animation(minimumInterval: 1.0 / 18.0, paused: !isMotionEnabled)) { timeline in
             let time = timeline.date.timeIntervalSinceReferenceDate
             let speed = 0.055 + song.rhythmEnergy * 0.025
             let progress = positiveModulo(time * speed + randomUnit(salt: 0.43), 1)
@@ -8843,19 +9009,69 @@ private struct PlayerPillOrbitingRimLight: View {
 }
 
 private struct PlayerPillRhythmLights: View {
+    private struct BarSeed: Identifiable {
+        let id: Int
+        let phaseA: Double
+        let phaseB: Double
+        let phaseC: Double
+        let loopPhase: Double
+        let speedA: Double
+        let speedB: Double
+        let speedC: Double
+        let loopSpeed: Double
+        let driftAmount: Double
+        let verticalAmount: Double
+        let loopRadiusXUnit: Double
+        let loopRadiusYUnit: Double
+    }
+
     let song: DemoSong
     let isPlaying: Bool
+    let isMotionEnabled: Bool
+    private let bpm: Double
+    private let orbitPhase: Double
+    private let barSeeds: [BarSeed]
 
-    private let bars = Array(0..<10)
+    init(song: DemoSong, isPlaying: Bool, isMotionEnabled: Bool) {
+        self.song = song
+        self.isPlaying = isPlaying
+        self.isMotionEnabled = isMotionEnabled
+        let libraryBPM = song.mediaItem?.beatsPerMinute ?? 0
+        bpm = libraryBPM > 0
+            ? min(156, max(58, Double(libraryBPM)))
+            : 54 + min(1, max(0, song.rhythmEnergy)) * 68
+        orbitPhase = Self.randomUnit(songID: song.id, index: 2000, salt: 6.41)
+        barSeeds = (0..<10).map { index in
+            BarSeed(
+                id: index,
+                phaseA: Self.randomUnit(songID: song.id, index: index, salt: 0.13) * .pi * 2,
+                phaseB: Self.randomUnit(songID: song.id, index: index, salt: 0.47) * .pi * 2,
+                phaseC: Self.randomUnit(songID: song.id, index: index, salt: 0.79) * .pi * 2,
+                loopPhase: Self.randomUnit(songID: song.id, index: index, salt: 4.19),
+                speedA: 0.62 + Self.randomUnit(songID: song.id, index: index, salt: 1.11) * 0.68,
+                speedB: 0.88 + Self.randomUnit(songID: song.id, index: index, salt: 1.73) * 0.74,
+                speedC: 0.48 + Self.randomUnit(songID: song.id, index: index, salt: 2.31) * 0.82,
+                loopSpeed: 0.034 + Self.randomUnit(songID: song.id, index: index, salt: 4.73) * 0.046,
+                driftAmount: 0.040 + Self.randomUnit(songID: song.id, index: index, salt: 2.89) * 0.082,
+                verticalAmount: 0.060 + Self.randomUnit(songID: song.id, index: index, salt: 3.37) * 0.135,
+                loopRadiusXUnit: Self.randomUnit(songID: song.id, index: index, salt: 5.37),
+                loopRadiusYUnit: Self.randomUnit(songID: song.id, index: index, salt: 5.91)
+            )
+        }
+    }
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 24.0)) { timeline in
+        TimelineView(
+            .animation(
+                minimumInterval: 1.0 / 24.0,
+                paused: !isMotionEnabled || !isPlaying
+            )
+        ) { timeline in
             let fallbackTime = timeline.date.timeIntervalSinceReferenceDate
             let playbackTime = currentPlaybackTime(fallbackTime: fallbackTime)
-            let bpm = playbackBPM(for: song)
             let beatPosition = playbackTime * bpm / 60.0
             let slidePosition = beatPosition * 0.18
-            let orbitProgress = positiveModulo(beatPosition * 0.048 + randomUnit(index: 2000, salt: 6.41), 1)
+            let orbitProgress = positiveModulo(beatPosition * 0.048 + orbitPhase, 1)
             let orbitAngle = orbitProgress * .pi * 2
             let reverseOrbitAngle = -orbitAngle + .pi * 0.72
             let beatPulse = pow(max(0, sin(beatPosition * .pi * 2)), 2)
@@ -8935,31 +9151,22 @@ private struct PlayerPillRhythmLights: View {
                     .blendMode(.plusLighter)
                     .opacity(isPlaying ? 0.58 : 0)
 
-                    ForEach(bars, id: \.self) { index in
-                        let phaseA = randomPhase(index: index, salt: 0.13)
-                        let phaseB = randomPhase(index: index, salt: 0.47)
-                        let phaseC = randomPhase(index: index, salt: 0.79)
-                        let loopPhase = randomUnit(index: index, salt: 4.19)
-                        let speedA = 0.62 + randomUnit(index: index, salt: 1.11) * 0.68
-                        let speedB = 0.88 + randomUnit(index: index, salt: 1.73) * 0.74
-                        let speedC = 0.48 + randomUnit(index: index, salt: 2.31) * 0.82
-                        let loopSpeed = 0.034 + randomUnit(index: index, salt: 4.73) * 0.046
-                        let driftAmount = 0.040 + randomUnit(index: index, salt: 2.89) * 0.082
-                        let verticalAmount = 0.060 + randomUnit(index: index, salt: 3.37) * 0.135
-                        let lanePhase = slidePosition * .pi * 2 * speedA + phaseA
+                    ForEach(barSeeds) { seed in
+                        let index = seed.id
+                        let lanePhase = slidePosition * .pi * 2 * seed.speedA + seed.phaseA
                         let laneWave = sin(lanePhase)
-                        let laneSwell = sin(slidePosition * .pi * 2 * speedB + phaseB)
-                        let laneDrift = sin(slidePosition * .pi * 2 * speedC + phaseC)
-                        let loopProgress = positiveModulo(beatPosition * loopSpeed + loopPhase, 1)
+                        let laneSwell = sin(slidePosition * .pi * 2 * seed.speedB + seed.phaseB)
+                        let laneDrift = sin(slidePosition * .pi * 2 * seed.speedC + seed.phaseC)
+                        let loopProgress = positiveModulo(beatPosition * seed.loopSpeed + seed.loopPhase, 1)
                         let loopBlend = loopEnvelope(progress: loopProgress)
-                        let loopAngle = loopSpinAngle(progress: loopProgress, phase: phaseC)
-                        let loopRadiusX = width * (0.155 + CGFloat(randomUnit(index: index, salt: 5.37)) * 0.095)
-                        let loopRadiusY = height * (0.220 + CGFloat(randomUnit(index: index, salt: 5.91)) * 0.170)
+                        let loopAngle = loopSpinAngle(progress: loopProgress, phase: seed.phaseC)
+                        let loopRadiusX = width * (0.155 + CGFloat(seed.loopRadiusXUnit) * 0.095)
+                        let loopRadiusY = height * (0.220 + CGFloat(seed.loopRadiusYUnit) * 0.170)
                         let loopX = cos(loopAngle) * Double(loopRadiusX) * loopBlend
                         let loopY = sin(loopAngle) * Double(loopRadiusY) * loopBlend
                         let x = width * (0.04 + CGFloat(index) * 0.102)
                             + CGFloat(horizontalWave) * width * 0.135
-                            + CGFloat(laneDrift) * width * CGFloat(driftAmount)
+                            + CGFloat(laneDrift) * width * CGFloat(seed.driftAmount)
                             + CGFloat(loopX)
                         let glowHeight = height * (0.30 + CGFloat(laneWave + 1) * 0.10 + CGFloat(laneSwell + 1) * 0.035)
                         let glowWidth = width * (0.145 + CGFloat(laneSwell + 1) * 0.025)
@@ -8967,7 +9174,7 @@ private struct PlayerPillRhythmLights: View {
                         let verticalOffset = height * (
                             0.47
                             - CGFloat(verticalWave) * 0.28
-                            - CGFloat(laneWave) * CGFloat(verticalAmount)
+                            - CGFloat(laneWave) * CGFloat(seed.verticalAmount)
                             + CGFloat(laneDrift) * 0.070
                         ) + CGFloat(loopY)
 
@@ -9071,27 +9278,13 @@ private struct PlayerPillRhythmLights: View {
     }
 
     private func currentPlaybackTime(fallbackTime: TimeInterval) -> TimeInterval {
-        guard isPlaying else { return 0 }
-        let playbackTime = MPMusicPlayerController.systemMusicPlayer.currentPlaybackTime
-        return playbackTime > 0 ? playbackTime : fallbackTime
+        isPlaying ? fallbackTime : 0
     }
 
-    private func playbackBPM(for song: DemoSong) -> Double {
-        let libraryBPM = song.mediaItem?.beatsPerMinute ?? 0
-        if libraryBPM > 0 {
-            return min(156, max(58, Double(libraryBPM)))
-        }
-        return estimatedBPM(for: song)
-    }
-
-    private func randomUnit(index: Int, salt: Double) -> Double {
-        let seed = (Double(index) + 1.0) * 12.9898 + Double(song.id) * 0.071 + salt * 78.233
-        let value = sin(seed) * 43758.5453
+    private static func randomUnit(songID: Int, index: Int, salt: Double) -> Double {
+        let seed = (Double(index) + 1.0) * 12.9898 + Double(songID) * 0.071 + salt * 78.233
+        let value = sin(seed) * 43_758.5453
         return value - floor(value)
-    }
-
-    private func randomPhase(index: Int, salt: Double) -> Double {
-        randomUnit(index: index, salt: salt) * .pi * 2
     }
 
     private func positiveModulo(_ value: Double, _ divisor: Double) -> Double {
@@ -9113,11 +9306,6 @@ private struct PlayerPillRhythmLights: View {
     private func smoothstep(edge0: Double, edge1: Double, x: Double) -> Double {
         let progress = min(max((x - edge0) / (edge1 - edge0), 0), 1)
         return progress * progress * (3 - 2 * progress)
-    }
-
-    private func estimatedBPM(for song: DemoSong) -> Double {
-        let energy = min(1, max(0, song.rhythmEnergy))
-        return 54 + energy * 68
     }
 
 }
