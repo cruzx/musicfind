@@ -9,6 +9,36 @@ import Foundation
 import Testing
 @testable import musicfind
 
+struct LRCLIBLRCParserTests {
+    @Test("Parses synced lyrics and orders them by timestamp")
+    func parsesAndSortsLines() {
+        let source = """
+        [00:12.50]Second line
+        [00:03.20]First line
+        [ar:Example Artist]
+        """
+
+        let lines = LRCLIBLRCParser.parse(source)
+
+        #expect(lines.count == 2)
+        #expect(lines[0].text == "First line")
+        #expect(lines[0].timestamp == 3.2)
+        #expect(lines[1].text == "Second line")
+        #expect(lines[1].timestamp == 12.5)
+    }
+
+    @Test("Creates one lyric entry for every timestamp on a shared line")
+    func parsesMultipleTimestamps() {
+        let source = "[00:05.00][00:45.250]Repeated chorus"
+
+        let lines = LRCLIBLRCParser.parse(source)
+
+        #expect(lines.count == 2)
+        #expect(lines.allSatisfy { $0.text == "Repeated chorus" })
+        #expect(lines.map(\.timestamp) == [5, 45.25])
+    }
+}
+
 @MainActor
 struct PlaybackCoreStateTests {
     @Test("Clicking a song creates a fresh start-at-zero request")

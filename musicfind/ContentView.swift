@@ -7215,6 +7215,8 @@ private struct FluidPlayerPage: View {
             Spacer(minLength: 0)
 
             VStack(alignment: .leading, spacing: 16) {
+                SyncedLyricsPairView(song: song, palette: palette)
+
                 HStack(spacing: 13) {
                     RotatingPlayerArtwork(song: song, isPlaying: isPlaying)
                         .frame(width: 48, height: 48)
@@ -7245,6 +7247,118 @@ private struct FluidPlayerPage: View {
         .accessibilityLabel("\(song.title), \(song.artist)")
         .accessibilityIdentifier("fluid-player-song-title")
         .accessibilityValue(String(song.id))
+    }
+}
+
+private struct SyncedLyricsPairView: View {
+    let song: DemoSong
+    let palette: PlayerImmersivePalette
+
+    @State private var lines: [SyncedLyricLine] = []
+
+    private var query: LRCLIBLyricsQuery {
+        LRCLIBLyricsQuery(
+            trackName: song.title,
+            artistName: song.artist,
+            albumName: song.mediaItem?.albumTitle,
+            duration: song.mediaItem?.playbackDuration
+        )
+    }
+
+    var body: some View {
+        ZStack(alignment: .bottomLeading) {
+            if lines.isEmpty == false {
+                TimelineView(.periodic(from: .now, by: 0.5)) { _ in
+                    let pair = visiblePair(at: playbackTimeForSong())
+
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(pair.current)
+                            .font(.headline.weight(.semibold))
+                            .foregroundStyle(palette.primaryText)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.76)
+
+                        Text(pair.next)
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(palette.secondaryText.opacity(0.68))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.76)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("同步歌词")
+            }
+        }
+        .frame(maxWidth: .infinity, minHeight: 46, maxHeight: 46, alignment: .bottomLeading)
+        .task(id: query) {
+            lines = []
+            if let embedded = song.lyricsText {
+                let parsed = LRCLIBLRCParser.parse(embedded)
+                if parsed.isEmpty == false {
+                    lines = parsed
+                    return
+                }
+            }
+
+            let fetched = await LRCLIBLyricsService.shared.lyrics(for: query)
+            guard Task.isCancelled == false else { return }
+            lines = fetched ?? []
+        }
+    }
+
+    private func playbackTimeForSong() -> TimeInterval {
+        let player = MPMusicPlayerController.systemMusicPlayer
+        guard matchesNowPlayingItem(player.nowPlayingItem) else { return 0 }
+        let time = player.currentPlaybackTime
+        return time.isFinite ? max(0, time) : 0
+    }
+
+    private func matchesNowPlayingItem(_ item: MPMediaItem?) -> Bool {
+        guard let item else { return false }
+        if let mediaItem = song.mediaItem,
+           mediaItem.persistentID != 0,
+           mediaItem.persistentID == item.persistentID {
+            return true
+        }
+
+        let itemStoreID = item.playbackStoreID
+        if let storeID = song.storeID,
+           storeID.isEmpty == false,
+           storeID != "0",
+           storeID == itemStoreID {
+            return true
+        }
+
+        return normalized(song.title) == normalized(item.title ?? "") &&
+            normalized(song.artist) == normalized(item.artist ?? "")
+    }
+
+    private func visiblePair(at playbackTime: TimeInterval) -> (current: String, next: String) {
+        guard lines.isEmpty == false else { return ("", "") }
+
+        var lowerBound = 0
+        var upperBound = lines.count
+        let adjustedTime = playbackTime + 0.12
+        while lowerBound < upperBound {
+            let middle = (lowerBound + upperBound) / 2
+            if lines[middle].timestamp <= adjustedTime {
+                lowerBound = middle + 1
+            } else {
+                upperBound = middle
+            }
+        }
+
+        let currentIndex = max(0, lowerBound - 1)
+        let nextIndex = min(currentIndex + 1, lines.count - 1)
+        let nextText = nextIndex == currentIndex ? " " : lines[nextIndex].text
+        return (lines[currentIndex].text, nextText)
+    }
+
+    private func normalized(_ value: String) -> String {
+        value
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 
