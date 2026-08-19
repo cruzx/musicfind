@@ -3472,7 +3472,67 @@ private final class MusicConnectionManager: ObservableObject {
     }
 
     func queuePlaybackPreservingOrder(for song: DemoSong, in queueSongs: [DemoSong]) {
+        if jumpWithinActiveQueueIfPossible(to: song, queueSongs: queueSongs) {
+            return
+        }
         queuePlayback(for: song, in: queueSongs, randomizeQueue: false)
+    }
+
+    private func jumpWithinActiveQueueIfPossible(to song: DemoSong, queueSongs: [DemoSong]) -> Bool {
+        guard previewAudioPlayer == nil,
+              song.hasApplePlaybackSource,
+              let currentSong,
+              let currentIndex = queueSongs.firstIndex(where: { isSameSong($0, currentSong) }),
+              let targetIndex = queueSongs.firstIndex(where: { isSameSong($0, song) }),
+              abs(targetIndex - currentIndex) == 1,
+              activePlaybackQueue.contains(where: { isSameSong($0, song) }),
+              musicPlayer.nowPlayingItem != nil else { return false }
+
+        beginPlaybackLoading()
+        queuedPlaybackTask?.cancel()
+        playbackStartVerificationTask?.cancel()
+        playbackPreparationWatchdogTask?.cancel()
+        autoAdvanceTask?.cancel()
+        playbackPrefetchTask?.cancel()
+
+        let requestID = playbackCoreState.select(songID: song.id)
+        var pending = PendingPlaybackStart(requestID: requestID, song: song)
+        pending.isPrepared = true
+        pending.didStart = true
+        pendingPlaybackStart = pending
+        shouldAutoAdvancePlayback = true
+        playingSongID = song.id
+        self.currentSong = song
+        isPlaying = true
+        rememberPlaybackSelection(song)
+
+        if let mediaItem = song.mediaItem {
+            musicPlayer.nowPlayingItem = mediaItem
+            musicPlayer.currentPlaybackTime = 0
+        } else if targetIndex > currentIndex {
+            musicPlayer.skipToNextItem()
+        } else {
+            musicPlayer.skipToPreviousItem()
+        }
+        musicPlayer.play()
+        playbackCoreState.didStart(songID: song.id)
+        schedulePlaybackPrefetch(startingWith: song, in: activePlaybackQueue, requestID: requestID)
+        endPlaybackLoading(requestID: requestID)
+
+        playbackStartVerificationTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(360))
+            guard !Task.isCancelled, let self, self.playbackRequestID == requestID else { return }
+            if self.isPlayerCurrentlyOn(song, player: self.musicPlayer) {
+                self.pendingPlaybackStart = nil
+                self.playbackStartVerificationTask = nil
+                return
+            }
+
+            self.pendingPlaybackStart = nil
+            self.playbackStartVerificationTask = nil
+            self.queuePlayback(for: song, in: queueSongs, randomizeQueue: false)
+        }
+        return true
     }
 
     func queuedNeighbor(for song: DemoSong, step: Int, fallbackSongs: [DemoSong]) -> DemoSong? {
@@ -6026,28 +6086,12 @@ private struct FluidPlayerOverlay: View {
     @State private var swipeAxis: SwipeAxis?
     @State private var transitionTask: Task<Void, Never>?
     @State private var playbackHandoffTask: Task<Void, Never>?
-    @StateObject private var spatialMotion = SpatialArtworkMotionObserver()
+    @State private var spatialMotion = SpatialArtworkMotionObserver()
 
     private var transitionDuration: Double { reduceMotion ? 0.22 : 0.56 }
-    private var spatialParallax: CGSize { reduceMotion ? .zero : spatialMotion.parallax }
-    private var edgeHighlightAngle: Angle {
-        .degrees(Double(spatialParallax.width * 28 + spatialParallax.height * 16))
-    }
-    private var cardFlipAngle: Double {
-        guard reduceMotion == false else { return 0 }
-        let motionAngle = Double(spatialParallax.width) * 11
-        let normalizedDrag = max(-1, min(1, dragOffset / 110))
-        let dragAngle = -Double(normalizedDrag) * 8
-        guard isTransitioning else { return motionAngle + dragAngle }
-        let transitionArc = sin(Double(transitionProgress) * .pi)
-        let dragHandoff = dragAngle * Double(1 - transitionProgress)
-        return motionAngle + dragHandoff - Double(transitionDirection) * 7 * transitionArc
-    }
-    private var cardDepthScale: CGFloat {
-        guard reduceMotion == false, isTransitioning else { return 1 }
-        return 1 - CGFloat(sin(Double(transitionProgress) * .pi)) * 0.035
-    }
     var body: some View {
+        let palette = PlayerPaletteCache.shared.palette(for: currentSong)
+
         GeometryReader { proxy in
             let topInset = max(proxy.safeAreaInsets.top, 8)
             ZStack {
@@ -6055,7 +6099,7 @@ private struct FluidPlayerOverlay: View {
                     song: currentSong,
                     isPlaying: isPlaying,
                     isMotionEnabled: !isTransitioning,
-                    parallax: spatialParallax
+                    detailMotionChannel: spatialMotion.detailChannel
                 )
 
                 if let targetSong {
@@ -6063,7 +6107,7 @@ private struct FluidPlayerOverlay: View {
                         song: targetSong,
                         isPlaying: isPlaying,
                         isMotionEnabled: false,
-                        parallax: spatialParallax
+                        detailMotionChannel: spatialMotion.detailChannel
                     )
                         .mask {
                             if reduceMotion {
@@ -6122,7 +6166,7 @@ private struct FluidPlayerOverlay: View {
                     Image(systemName: "chevron.down")
                         .font(.headline.weight(.bold))
                         .foregroundStyle(
-                            PlayerImmersivePalette(accentColor: currentSong.magicColor).primaryText
+                            palette.primaryText
                         )
                         .frame(width: 44, height: 44)
                         .liquidGlassSurface(cornerRadius: 22, isInteractive: true)
@@ -6140,32 +6184,12 @@ private struct FluidPlayerOverlay: View {
             PlayerCardGlassAura(song: currentSong)
         }
         .overlay {
-            PlayerCardGlassSheen(
+            PlayerCardMotionChrome(
                 song: currentSong,
-                highlightAngle: edgeHighlightAngle
+                motionChannel: spatialMotion.detailChannel,
+                reduceMotion: reduceMotion
             )
             .allowsHitTesting(false)
-        }
-        .overlay {
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .stroke(
-                    AngularGradient(
-                        colors: [
-                            .white.opacity(0.76),
-                            PlayerImmersivePalette(accentColor: currentSong.magicColor).accent.opacity(0.50),
-                            .white.opacity(0.10),
-                            .white.opacity(0.38),
-                            PlayerImmersivePalette(accentColor: currentSong.magicColor).accent.opacity(0.34),
-                            .white.opacity(0.76)
-                        ],
-                        center: .center,
-                        angle: edgeHighlightAngle
-                    ),
-                    lineWidth: 1.4
-                )
-                .padding(0.7)
-                .blendMode(.screen)
-                .allowsHitTesting(false)
         }
         .overlay {
             RoundedRectangle(cornerRadius: 23, style: .continuous)
@@ -6175,19 +6199,22 @@ private struct FluidPlayerOverlay: View {
                 .allowsHitTesting(false)
         }
         .compositingGroup()
-        .rotation3DEffect(
-            .degrees(cardFlipAngle),
-            axis: (x: 0, y: 1, z: 0),
-            anchor: .center,
-            perspective: 0.72
+        .modifier(
+            PlayerCardSpatialTransform(
+                motionChannel: spatialMotion.transformChannel,
+                reduceMotion: reduceMotion,
+                dragOffset: dragOffset,
+                transitionProgress: transitionProgress,
+                transitionDirection: transitionDirection,
+                isTransitioning: isTransitioning
+            )
         )
-        .scaleEffect(cardDepthScale)
         .offset(x: dragOffset * 0.12)
         .opacity(isContentVisible ? 1 : 0)
         .scaleEffect(isContentVisible ? 1 : 0.985)
         .animation(.easeOut(duration: 0.18), value: isContentVisible)
         .shadow(
-            color: PlayerImmersivePalette(accentColor: currentSong.magicColor).accent.opacity(0.08),
+            color: palette.accent.opacity(0.08),
             radius: 22,
             x: 0,
             y: 12
@@ -6271,24 +6298,33 @@ private struct FluidPlayerOverlay: View {
                 let horizontal = value.translation.width
                 let vertical = value.translation.height
                 if swipeAxis == nil {
-                    swipeAxis = abs(horizontal) > abs(vertical) * 1.25 ? .horizontal : .vertical
+                    let horizontalDistance = abs(horizontal)
+                    let verticalDistance = abs(vertical)
+                    if horizontalDistance > verticalDistance * 1.12 {
+                        swipeAxis = .horizontal
+                    } else if verticalDistance > horizontalDistance * 1.28 {
+                        swipeAxis = .vertical
+                    }
                 }
                 if swipeAxis == .vertical {
                     dragOffset = 0
                     return
                 }
-                dragOffset = resistedDrag(horizontal)
+                if swipeAxis == .horizontal {
+                    dragOffset = resistedDrag(horizontal)
+                }
             }
             .onEnded { value in
                 defer { swipeAxis = nil }
                 guard !isTransitioning else { return }
-                if swipeAxis == .vertical {
+                let horizontalIntent = max(abs(value.translation.width), abs(value.predictedEndTranslation.width) * 0.55)
+                let verticalIntent = max(abs(value.translation.height), abs(value.predictedEndTranslation.height) * 0.55)
+                let resolvedAxis: SwipeAxis = horizontalIntent >= verticalIntent * 0.90
+                    ? .horizontal
+                    : (swipeAxis ?? .vertical)
+                if resolvedAxis == .vertical {
                     dragOffset = 0
                     finishDismissDrag(value)
-                    return
-                }
-                guard swipeAxis == .horizontal else {
-                    dragOffset = 0
                     return
                 }
                 finishDrag(value)
@@ -6364,7 +6400,7 @@ private struct FluidPlayerOverlay: View {
             withTransaction(transaction) {
                 targetIndex = nil
                 transitionProgress = 0
-                currentIndex = indexForNowPlaying() ?? nextIndex
+                currentIndex = nextIndex
                 dragOffset = 0
             }
             preloadNearbyArtwork()
@@ -6434,41 +6470,123 @@ private struct FluidSwipeMask: View {
     }
 }
 
+private struct PlayerCardSpatialTransform: ViewModifier {
+    @ObservedObject var motionChannel: SpatialMotionChannel
+    let reduceMotion: Bool
+    let dragOffset: CGFloat
+    let transitionProgress: CGFloat
+    let transitionDirection: CGFloat
+    let isTransitioning: Bool
+
+    func body(content: Content) -> some View {
+        let parallax = reduceMotion ? CGSize.zero : motionChannel.parallax
+        let motionAngle = Double(parallax.width) * 11
+        let normalizedDrag = max(-1, min(1, dragOffset / 110))
+        let dragAngle = reduceMotion ? 0 : -Double(normalizedDrag) * 8
+        let transitionArc = sin(Double(transitionProgress) * .pi)
+        let dragHandoff = dragAngle * Double(1 - transitionProgress)
+        let transitionAngle = isTransitioning
+            ? -Double(transitionDirection) * 7 * transitionArc
+            : 0
+        let flipAngle = reduceMotion ? 0 : motionAngle + dragHandoff + transitionAngle
+        let depthScale = reduceMotion || !isTransitioning
+            ? CGFloat(1)
+            : 1 - CGFloat(transitionArc) * 0.035
+
+        content
+            .rotation3DEffect(
+                .degrees(flipAngle),
+                axis: (x: 0, y: 1, z: 0),
+                anchor: .center,
+                perspective: 0.72
+            )
+            .scaleEffect(depthScale)
+            .animation(.linear(duration: 0.05), value: parallax)
+    }
+}
+
+private struct PlayerCardMotionChrome: View {
+    let song: DemoSong
+    @ObservedObject var motionChannel: SpatialMotionChannel
+    let reduceMotion: Bool
+
+    var body: some View {
+        let parallax = reduceMotion ? CGSize.zero : motionChannel.parallax
+        let highlightAngle = Angle.degrees(Double(parallax.width * 28 + parallax.height * 16))
+        let palette = PlayerPaletteCache.shared.palette(for: song)
+
+        ZStack {
+            PlayerCardGlassSheen(song: song, highlightAngle: highlightAngle)
+
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(
+                    AngularGradient(
+                        colors: [
+                            .white.opacity(0.76),
+                            palette.accent.opacity(0.50),
+                            .white.opacity(0.10),
+                            .white.opacity(0.38),
+                            palette.accent.opacity(0.34),
+                            .white.opacity(0.76)
+                        ],
+                        center: .center,
+                        angle: highlightAngle
+                    ),
+                    lineWidth: 1.4
+                )
+                .padding(0.7)
+                .blendMode(.screen)
+        }
+    }
+}
+
+private struct MotionDrivenPlayerArtwork: View {
+    let song: DemoSong
+    @ObservedObject var motionChannel: SpatialMotionChannel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        let parallax = reduceMotion ? CGSize.zero : motionChannel.parallax
+
+        SongArtworkLayer(song: song)
+            .scaleEffect(1.05)
+            .offset(x: parallax.width * 7, y: parallax.height * 5)
+            .saturation(1.13)
+            .contrast(1.075)
+            .brightness(0.008)
+            .clipped()
+            .mask {
+                LinearGradient(
+                    gradient: Gradient(stops: [
+                        .init(color: .white, location: 0.00),
+                        .init(color: .white, location: 0.62),
+                        .init(color: .white.opacity(0.82), location: 0.72),
+                        .init(color: .white.opacity(0.46), location: 0.86),
+                        .init(color: .white.opacity(0.16), location: 0.95),
+                        .init(color: .clear, location: 1.00)
+                    ]),
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            }
+    }
+}
+
 private struct FluidPlayerBackdrop: View {
     let song: DemoSong
     let isPlaying: Bool
     let isMotionEnabled: Bool
-    let parallax: CGSize
+    let detailMotionChannel: SpatialMotionChannel
 
     var body: some View {
-        let palette = PlayerImmersivePalette(accentColor: song.magicColor)
+        let palette = PlayerPaletteCache.shared.palette(for: song)
 
         GeometryReader { proxy in
             let artworkHeight = proxy.size.height * 0.70
 
             ZStack(alignment: .topLeading) {
-                SongArtworkLayer(song: song)
+                MotionDrivenPlayerArtwork(song: song, motionChannel: detailMotionChannel)
                     .frame(width: proxy.size.width, height: artworkHeight)
-                    .scaleEffect(1.05)
-                    .offset(x: parallax.width * 7, y: parallax.height * 5)
-                    .saturation(1.13)
-                    .contrast(1.075)
-                    .brightness(0.008)
-                    .clipped()
-                    .mask {
-                        LinearGradient(
-                            gradient: Gradient(stops: [
-                                .init(color: .white, location: 0.00),
-                                .init(color: .white, location: 0.62),
-                                .init(color: .white.opacity(0.82), location: 0.72),
-                                .init(color: .white.opacity(0.46), location: 0.86),
-                                .init(color: .white.opacity(0.16), location: 0.95),
-                                .init(color: .clear, location: 1.00)
-                            ]),
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                    }
 
                 VStack(spacing: 0) {
                     Spacer(minLength: 0)
@@ -6934,32 +7052,43 @@ private extension UIImage {
     }
 }
 
-private final class SpatialArtworkMotionObserver: ObservableObject {
+@MainActor
+private final class SpatialMotionChannel: ObservableObject {
     @Published var parallax: CGSize = .zero
+}
+
+@MainActor
+private final class SpatialArtworkMotionObserver {
+    let transformChannel = SpatialMotionChannel()
+    let detailChannel = SpatialMotionChannel()
 
     private let manager = CMMotionManager()
     private var baseline: CMAcceleration?
     private var smoothed = CGSize.zero
-    private var lastPublished = CGSize.zero
-    private var lastPublishTime = Date.distantPast
+    private var lastTransformPublished = CGSize.zero
+    private var lastDetailPublished = CGSize.zero
+    private var lastTransformPublishTime = Date.distantPast
+    private var lastDetailPublishTime = Date.distantPast
 
     func start() {
 #if DEBUG
         if let rawVector = ProcessInfo.processInfo.environment["FLIPMUSIC_SPATIAL_TEST_VECTOR"] {
             let components = rawVector.split(separator: ",").compactMap { Double($0) }
             if components.count == 2 {
-                parallax = CGSize(
+                let testParallax = CGSize(
                     width: max(-1, min(1, components[0])),
                     height: max(-1, min(1, components[1]))
                 )
+                transformChannel.parallax = testParallax
+                detailChannel.parallax = testParallax
                 return
             }
         }
 #endif
         guard manager.isDeviceMotionAvailable, manager.isDeviceMotionActive == false else { return }
         baseline = nil
-        smoothed = parallax
-        manager.deviceMotionUpdateInterval = 1.0 / 12.0
+        smoothed = transformChannel.parallax
+        manager.deviceMotionUpdateInterval = 1.0 / 30.0
         manager.startDeviceMotionUpdates(to: .main) { [weak self] deviceMotion, _ in
             guard let self, let gravity = deviceMotion?.gravity else { return }
             if baseline == nil {
@@ -6973,20 +7102,32 @@ private final class SpatialArtworkMotionObserver: ObservableObject {
                 height: max(-1, min(1, (gravity.y - baseline.y) * 3.6))
             )
             smoothed = CGSize(
-                width: smoothed.width * 0.82 + target.width * 0.18,
-                height: smoothed.height * 0.82 + target.height * 0.18
+                width: smoothed.width * 0.90 + target.width * 0.10,
+                height: smoothed.height * 0.90 + target.height * 0.10
             )
 
-            let delta = max(
-                abs(smoothed.width - lastPublished.width),
-                abs(smoothed.height - lastPublished.height)
-            )
             let now = Date()
-            guard delta >= 0.024,
-                  now.timeIntervalSince(lastPublishTime) >= 1.0 / 12.0 else { return }
-            lastPublished = smoothed
-            lastPublishTime = now
-            parallax = smoothed
+            let transformDelta = max(
+                abs(smoothed.width - lastTransformPublished.width),
+                abs(smoothed.height - lastTransformPublished.height)
+            )
+            if transformDelta >= 0.008,
+               now.timeIntervalSince(lastTransformPublishTime) >= 1.0 / 30.0 {
+                lastTransformPublished = smoothed
+                lastTransformPublishTime = now
+                transformChannel.parallax = smoothed
+            }
+
+            let detailDelta = max(
+                abs(smoothed.width - lastDetailPublished.width),
+                abs(smoothed.height - lastDetailPublished.height)
+            )
+            if detailDelta >= 0.024,
+               now.timeIntervalSince(lastDetailPublishTime) >= 1.0 / 12.0 {
+                lastDetailPublished = smoothed
+                lastDetailPublishTime = now
+                detailChannel.parallax = smoothed
+            }
         }
     }
 
@@ -6999,17 +7140,29 @@ private final class SpatialArtworkMotionObserver: ObservableObject {
         manager.stopDeviceMotionUpdates()
         baseline = nil
         smoothed = .zero
-        lastPublished = .zero
-        parallax = .zero
+        lastTransformPublished = .zero
+        lastDetailPublished = .zero
+        lastTransformPublishTime = .distantPast
+        lastDetailPublishTime = .distantPast
+        transformChannel.parallax = .zero
+        detailChannel.parallax = .zero
     }
 }
 
 private struct FluidPlayerLeadingArtwork: View {
     let song: DemoSong
-    @ObservedObject private var artworkCache = PlayerArtworkWarmupCache.shared
+    private let artworkCache = PlayerArtworkWarmupCache.shared
+    @StateObject private var artworkToken: PlayerArtworkRevisionToken
+
+    init(song: DemoSong) {
+        self.song = song
+        _artworkToken = StateObject(
+            wrappedValue: PlayerArtworkWarmupCache.shared.token(for: song.id)
+        )
+    }
 
     var body: some View {
-        let _ = artworkCache.revision
+        let _ = artworkToken.revision
         GeometryReader { proxy in
             if let artworkImage = artworkCache.artwork(for: song) ?? song.artworkImage {
                 let sourceWidth = max(artworkImage.size.width, 1)
@@ -7056,7 +7209,7 @@ private struct FluidPlayerPage: View {
     let isPlaying: Bool
 
     var body: some View {
-        let palette = PlayerImmersivePalette(accentColor: song.magicColor)
+        let palette = PlayerPaletteCache.shared.palette(for: song)
 
         VStack(spacing: 0) {
             Spacer(minLength: 0)
@@ -7124,7 +7277,7 @@ private struct FluidPlayerProgress: View {
     let song: DemoSong
 
     var body: some View {
-        let palette = PlayerImmersivePalette(accentColor: song.magicColor)
+        let palette = PlayerPaletteCache.shared.palette(for: song)
 
         TimelineView(.periodic(from: .now, by: 1)) { _ in
             let player = MPMusicPlayerController.systemMusicPlayer
@@ -7275,6 +7428,27 @@ private struct PlayerImmersivePalette {
             progress: UIColor(rgb: values.3),
             isGray: family == .gray
         )
+    }
+}
+
+@MainActor
+private final class PlayerPaletteCache {
+    static let shared = PlayerPaletteCache()
+
+    private var palettes: [Int: PlayerImmersivePalette] = [:]
+
+    private init() {}
+
+    func palette(for song: DemoSong) -> PlayerImmersivePalette {
+        if let palette = palettes[song.id] {
+            return palette
+        }
+        let palette = PlayerImmersivePalette(accentColor: song.magicColor)
+        if palettes.count >= 256 {
+            palettes.removeAll(keepingCapacity: true)
+        }
+        palettes[song.id] = palette
+        return palette
     }
 }
 
@@ -8028,12 +8202,21 @@ private struct PlayerCoverArtwork: View {
 }
 
 @MainActor
-private final class PlayerArtworkWarmupCache: ObservableObject {
+private final class PlayerArtworkRevisionToken: ObservableObject {
+    @Published private(set) var revision = 0
+
+    func markUpdated() {
+        revision &+= 1
+    }
+}
+
+@MainActor
+private final class PlayerArtworkWarmupCache {
     static let shared = PlayerArtworkWarmupCache()
 
-    @Published private(set) var revision = 0
     private let artworkCache = NSCache<NSNumber, UIImage>()
     private var warmingIDs = Set<Int>()
+    private var revisionTokens: [Int: PlayerArtworkRevisionToken] = [:]
 
     private init() {
         artworkCache.countLimit = 120
@@ -8041,6 +8224,15 @@ private final class PlayerArtworkWarmupCache: ObservableObject {
 
     func artwork(for song: DemoSong) -> UIImage? {
         artworkCache.object(forKey: NSNumber(value: song.id))
+    }
+
+    func token(for songID: Int) -> PlayerArtworkRevisionToken {
+        if let token = revisionTokens[songID] {
+            return token
+        }
+        let token = PlayerArtworkRevisionToken()
+        revisionTokens[songID] = token
+        return token
     }
 
     func preload(songs: [DemoSong]) {
@@ -8065,9 +8257,9 @@ private final class PlayerArtworkWarmupCache: ObservableObject {
                     guard Task.isCancelled == false else { break }
                     if let image = await target.image.byPreparingForDisplay() {
                         artworkCache.setObject(image, forKey: NSNumber(value: target.id))
+                        token(for: target.id).markUpdated()
                     }
                 }
-                revision &+= 1
             }
             targets.forEach { self.warmingIDs.remove($0.id) }
         }
@@ -10242,12 +10434,26 @@ private struct HomeInteractiveSongSquare: View {
 
 private struct SongArtworkLayer: View {
     let song: DemoSong
-    var contentMode: ContentMode = .fill
-    var alignment: Alignment = .center
-    @ObservedObject private var artworkCache = PlayerArtworkWarmupCache.shared
+    let contentMode: ContentMode
+    let alignment: Alignment
+    private let artworkCache = PlayerArtworkWarmupCache.shared
+    @StateObject private var artworkToken: PlayerArtworkRevisionToken
+
+    init(
+        song: DemoSong,
+        contentMode: ContentMode = .fill,
+        alignment: Alignment = .center
+    ) {
+        self.song = song
+        self.contentMode = contentMode
+        self.alignment = alignment
+        _artworkToken = StateObject(
+            wrappedValue: PlayerArtworkWarmupCache.shared.token(for: song.id)
+        )
+    }
 
     var body: some View {
-        let _ = artworkCache.revision
+        let _ = artworkToken.revision
         Group {
         if let artworkImage = artworkCache.artwork(for: song) ?? song.artworkImage {
             Image(uiImage: artworkImage)
