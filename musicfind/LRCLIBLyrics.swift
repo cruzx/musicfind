@@ -39,7 +39,7 @@ actor LRCLIBLyricsService {
     }
 
     private var cache: [LRCLIBLyricsQuery: [SyncedLyricLine]] = [:]
-    private var missingQueries: Set<LRCLIBLyricsQuery> = []
+    private var missingQueries: [LRCLIBLyricsQuery: Date] = [:]
     private var activeTasks: [LRCLIBLyricsQuery: Task<[SyncedLyricLine]?, Never>] = [:]
 
     func lyrics(for query: LRCLIBLyricsQuery) async -> [SyncedLyricLine]? {
@@ -49,8 +49,11 @@ actor LRCLIBLyricsService {
         if let cached = cache[query] {
             return cached
         }
-        if missingQueries.contains(query) {
-            return nil
+        if let missingDate = missingQueries[query] {
+            if Date().timeIntervalSince(missingDate) < 20 {
+                return nil
+            }
+            missingQueries[query] = nil
         }
         if let activeTask = activeTasks[query] {
             return await activeTask.value
@@ -66,7 +69,7 @@ actor LRCLIBLyricsService {
         if let result, result.isEmpty == false {
             cache[query] = result
         } else {
-            missingQueries.insert(query)
+            missingQueries[query] = Date()
         }
         return result
     }
@@ -76,10 +79,11 @@ actor LRCLIBLyricsService {
             return detailedResult
         }
 
-        guard query.albumName != nil || query.duration != nil else {
-            return nil
+        if query.albumName != nil || query.duration != nil,
+           let basicResult = await fetch(query: query, includeDetails: false) {
+            return basicResult
         }
-        return await fetch(query: query, includeDetails: false)
+        return await search(query: query)
     }
 
     private static func fetch(
@@ -124,6 +128,41 @@ actor LRCLIBLyricsService {
             }
             let lines = LRCLIBLRCParser.parse(syncedLyrics)
             return lines.isEmpty ? nil : lines
+        } catch {
+            return nil
+        }
+    }
+
+    private static func search(query: LRCLIBLyricsQuery) async -> [SyncedLyricLine]? {
+        var components = URLComponents(string: "https://lrclib.net/api/search")
+        components?.queryItems = [
+            URLQueryItem(name: "track_name", value: query.trackName),
+            URLQueryItem(name: "artist_name", value: query.artistName)
+        ]
+        guard let url = components?.url else { return nil }
+
+        var request = URLRequest(
+            url: url,
+            cachePolicy: .returnCacheDataElseLoad,
+            timeoutInterval: 8
+        )
+        request.setValue(
+            "FlipMusic/1.0 (https://github.com/cruzx/musicfind)",
+            forHTTPHeaderField: "User-Agent"
+        )
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let httpResponse = response as? HTTPURLResponse,
+                  (200..<300).contains(httpResponse.statusCode) else { return nil }
+            let matches = try JSONDecoder().decode([Response].self, from: data)
+            for match in matches where match.instrumental == false {
+                guard let syncedLyrics = match.syncedLyrics else { continue }
+                let lines = LRCLIBLRCParser.parse(syncedLyrics)
+                if lines.isEmpty == false { return lines }
+            }
+            return nil
         } catch {
             return nil
         }

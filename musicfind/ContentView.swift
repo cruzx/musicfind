@@ -6595,13 +6595,38 @@ private struct FluidPlayerBackdrop: View {
                         .fill(.ultraThinMaterial)
                         .overlay {
                             Color.black
-                                .opacity(0.64)
+                                .opacity(0.54)
+                        }
+                        .overlay {
+                            LinearGradient(
+                                stops: [
+                                    .init(color: song.magicColor.opacity(0.24), location: 0.00),
+                                    .init(color: palette.accent.opacity(0.17), location: 0.34),
+                                    .init(color: song.magicColor.opacity(0.12), location: 0.64),
+                                    .init(color: .black.opacity(0.10), location: 1.00)
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        }
+                        .overlay {
+                            RadialGradient(
+                                colors: [
+                                    palette.accent.opacity(0.16),
+                                    song.magicColor.opacity(0.08),
+                                    .clear
+                                ],
+                                center: UnitPoint(x: 0.72, y: 0.20),
+                                startRadius: 0,
+                                endRadius: proxy.size.width * 0.78
+                            )
+                            .blendMode(.screen)
                         }
                         .overlay {
                             LinearGradient(
                                 colors: [
-                                    .white.opacity(0.055),
-                                    palette.accent.opacity(0.105),
+                                    .white.opacity(0.065),
+                                    palette.accent.opacity(0.16),
                                     .white.opacity(0.050),
                                     .black.opacity(0.04)
                                 ],
@@ -6631,20 +6656,24 @@ private struct FluidPlayerBackdrop: View {
                 VStack(spacing: 0) {
                     Spacer(minLength: 0)
 
-                    PlayerPillRhythmLights(
+                    PlayerCardWaveLights(
                         song: song,
                         isPlaying: isPlaying,
                         isMotionEnabled: isMotionEnabled
                     )
-                        .frame(width: proxy.size.width + 36, height: 104)
-                        .opacity(0.78)
+                        .frame(
+                            width: proxy.size.width + 84,
+                            height: proxy.size.height * 0.45
+                        )
+                        .opacity(0.90)
                         .mask {
                             LinearGradient(
                                 stops: [
                                     .init(color: .clear, location: 0.00),
-                                    .init(color: .white.opacity(0.28), location: 0.24),
-                                    .init(color: .white.opacity(0.82), location: 0.52),
-                                    .init(color: .white, location: 0.76),
+                                    .init(color: .white.opacity(0.18), location: 0.14),
+                                    .init(color: .white.opacity(0.58), location: 0.36),
+                                    .init(color: .white.opacity(0.92), location: 0.62),
+                                    .init(color: .white, location: 0.80),
                                     .init(color: .white.opacity(0.72), location: 1.00)
                                 ],
                                 startPoint: .top,
@@ -6654,8 +6683,130 @@ private struct FluidPlayerBackdrop: View {
                         .padding(.bottom, 2)
                         .allowsHitTesting(false)
                 }
+
+                VStack(spacing: 0) {
+                    Spacer(minLength: 0)
+
+                    LinearGradient(
+                        stops: [
+                            .init(color: .clear, location: 0.00),
+                            .init(color: .black.opacity(0.08), location: 0.22),
+                            .init(color: .black.opacity(0.20), location: 0.48),
+                            .init(color: .black.opacity(0.30), location: 0.72),
+                            .init(color: .black.opacity(0.36), location: 1.00)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                    .frame(height: proxy.size.height * 0.45)
+                    .allowsHitTesting(false)
+                }
             }
             .clipped()
+        }
+    }
+}
+
+private struct PlayerCardWaveLights: View {
+    let song: DemoSong
+    let isPlaying: Bool
+    let isMotionEnabled: Bool
+
+    var body: some View {
+        let palette = PlayerPaletteCache.shared.palette(for: song)
+        let secondaryCoverColor = song.colors.dropFirst().first ?? palette.accent
+
+        TimelineView(
+            .animation(
+                minimumInterval: 1.0 / 18.0,
+                paused: !isMotionEnabled || !isPlaying
+            )
+        ) { timeline in
+            let time = timeline.date.timeIntervalSinceReferenceDate
+            let primaryWave = sin(time * 0.52)
+            let secondaryWave = sin(time * 0.41 + 2.1)
+            let crestWave = sin(time * 0.67 + 0.8)
+
+            GeometryReader { proxy in
+                let width = max(proxy.size.width, 1)
+                let height = max(proxy.size.height, 1)
+
+                ZStack {
+                    Ellipse()
+                        .fill(
+                            RadialGradient(
+                                colors: [
+                                    secondaryCoverColor.opacity(0.22),
+                                    song.magicColor.opacity(0.62),
+                                    palette.accent.opacity(0.34),
+                                    song.magicColor.opacity(0.08),
+                                    .clear
+                                ],
+                                center: .center,
+                                startRadius: 0,
+                                endRadius: width * 0.72
+                            )
+                        )
+                        .frame(width: width * 1.55, height: height * 0.96)
+                        .offset(
+                            x: CGFloat(primaryWave) * width * 0.08,
+                            y: height * (0.28 + CGFloat(secondaryWave) * 0.05)
+                        )
+                        .blur(radius: 26)
+                        .blendMode(.plusLighter)
+
+                    Capsule()
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    .clear,
+                                    song.magicColor.opacity(0.30),
+                                    secondaryCoverColor.opacity(0.46),
+                                    song.magicColor.opacity(0.54),
+                                    palette.accent.opacity(0.26),
+                                    .clear
+                                ],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                        .frame(width: width * 1.42, height: height * 0.36)
+                        .rotationEffect(.degrees(primaryWave * 5.5))
+                        .offset(
+                            x: CGFloat(secondaryWave) * width * 0.10,
+                            y: height * (0.08 + CGFloat(crestWave) * 0.09)
+                        )
+                        .blur(radius: 19)
+                        .blendMode(.plusLighter)
+
+                    Capsule()
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    .clear,
+                                    palette.accent.opacity(0.24),
+                                    song.magicColor.opacity(0.42),
+                                    secondaryCoverColor.opacity(0.38),
+                                    palette.accent.opacity(0.28),
+                                    .clear
+                                ],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                        .frame(width: width * 1.50, height: height * 0.30)
+                        .rotationEffect(.degrees(-secondaryWave * 4.5))
+                        .offset(
+                            x: CGFloat(primaryWave) * width * 0.12,
+                            y: height * (0.38 + CGFloat(secondaryWave) * 0.07)
+                        )
+                        .blur(radius: 22)
+                        .blendMode(.plusLighter)
+                }
+                .frame(width: width, height: height)
+                .opacity(isPlaying ? 1 : 0)
+                .animation(.easeOut(duration: 0.24), value: isPlaying)
+            }
         }
     }
 }
@@ -7222,12 +7373,10 @@ private struct FluidPlayerPage: View {
                         .frame(width: 48, height: 48)
 
                     VStack(alignment: .leading, spacing: 5) {
-                        Text(song.title)
-                            .font(.title2.weight(.bold))
-                            .foregroundStyle(palette.primaryText)
-                            .lineLimit(2)
-                            .minimumScaleFactor(0.72)
-                            .multilineTextAlignment(.leading)
+                        OneWayMarqueeTitle(
+                            text: song.title,
+                            color: palette.primaryText
+                        )
 
                         Text(song.artist)
                             .font(.body.weight(.medium))
@@ -7247,6 +7396,99 @@ private struct FluidPlayerPage: View {
         .accessibilityLabel("\(song.title), \(song.artist)")
         .accessibilityIdentifier("fluid-player-song-title")
         .accessibilityValue(String(song.id))
+    }
+}
+
+private struct MarqueeTextWidthPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+private struct OneWayMarqueeTitle: View {
+    let text: String
+    let color: Color
+
+    private let gap: CGFloat = 36
+    private let pointsPerSecond: CGFloat = 28
+
+    @State private var textWidth: CGFloat = 0
+    @State private var containerWidth: CGFloat = 0
+    @State private var offset: CGFloat = 0
+
+    private var shouldScroll: Bool {
+        textWidth > containerWidth + 1
+    }
+
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack(alignment: .leading) {
+                if shouldScroll {
+                    HStack(spacing: gap) {
+                        titleLabel
+                        titleLabel
+                    }
+                    .offset(x: offset)
+                } else {
+                    titleLabel
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+            .clipped()
+            .onAppear {
+                containerWidth = proxy.size.width
+                restartAnimation()
+            }
+            .onChange(of: proxy.size.width) { _, width in
+                containerWidth = width
+                restartAnimation()
+            }
+        }
+        .frame(height: 28)
+        .background {
+            titleLabel
+                .hidden()
+                .background {
+                    GeometryReader { proxy in
+                        Color.clear.preference(
+                            key: MarqueeTextWidthPreferenceKey.self,
+                            value: proxy.size.width
+                        )
+                    }
+                }
+        }
+        .onPreferenceChange(MarqueeTextWidthPreferenceKey.self) { width in
+            textWidth = width
+            restartAnimation()
+        }
+        .onChange(of: text) { _, _ in
+            offset = 0
+            restartAnimation()
+        }
+        .accessibilityLabel(text)
+    }
+
+    private var titleLabel: some View {
+        Text(text)
+            .font(.title2.weight(.bold))
+            .foregroundStyle(color)
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
+    }
+
+    private func restartAnimation() {
+        offset = 0
+        guard shouldScroll else { return }
+
+        let travelDistance = textWidth + gap
+        let duration = max(6, travelDistance / pointsPerSecond)
+        DispatchQueue.main.async {
+            withAnimation(.linear(duration: duration).repeatForever(autoreverses: false)) {
+                offset = -travelDistance
+            }
+        }
     }
 }
 
@@ -7271,26 +7513,18 @@ private struct SyncedLyricsPairView: View {
                 TimelineView(.periodic(from: .now, by: 0.5)) { _ in
                     let pair = visiblePair(at: playbackTimeForSong())
 
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text(pair.current)
-                            .font(.headline.weight(.semibold))
-                            .foregroundStyle(palette.primaryText)
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.76)
-
-                        Text(pair.next)
-                            .font(.subheadline.weight(.medium))
-                            .foregroundStyle(palette.secondaryText.opacity(0.68))
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.76)
-                    }
+                    Text(pair.current)
+                        .font(.system(size: 36, weight: .bold))
+                        .foregroundStyle(palette.primaryText)
+                        .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .accessibilityElement(children: .combine)
                 .accessibilityLabel("同步歌词")
             }
         }
-        .frame(maxWidth: .infinity, minHeight: 46, maxHeight: 46, alignment: .bottomLeading)
+        .frame(maxWidth: .infinity, minHeight: 90, maxHeight: 90, alignment: .bottomLeading)
+        .offset(y: -60)
         .task(id: query) {
             lines = []
             if let embedded = song.lyricsText {
@@ -7416,7 +7650,7 @@ private struct FluidPlayerProgress: View {
                     Text(duration > 0 ? "-\(formatTime(max(0, duration - elapsed)))" : "--:--")
                 }
                 .font(.caption.monospacedDigit())
-                .foregroundStyle(palette.secondaryText.opacity(0.78))
+                .foregroundStyle(palette.secondaryText)
             }
         }
         .accessibilityElement(children: .ignore)
@@ -7456,15 +7690,7 @@ private struct PlayerImmersivePalette {
             saturation: saturation,
             brightness: brightness
         )
-        let followsTheme = saturation >= 0.12 && token.isGray == false
-        let mixedPrimary = followsTheme ? token.primary.mixed(with: source, amount: 0.45) : token.primary
-        let mixedSecondary = followsTheme ? token.secondary.mixed(with: source, amount: 0.351) : token.secondary
-        let mixedProgress = followsTheme ? token.progress.mixed(with: source, amount: 0.306) : token.progress
         let isLightCover = brightness > 0.58
-        let glassReference = UIColor(white: 0.16, alpha: 1)
-        let primary = mixedPrimary.ensuringContrast(against: glassReference, minimum: 4.8)
-        let secondary = mixedSecondary.ensuringContrast(against: glassReference, minimum: 4.5)
-        let progress = mixedProgress.ensuringContrast(against: glassReference, minimum: 3.2)
 
         backgroundTop = Color(uiColor: isLightCover ? token.surface : UIColor(
             hue: hue,
@@ -7474,9 +7700,9 @@ private struct PlayerImmersivePalette {
         ))
         backgroundMiddle = Color(uiColor: token.surface.mixed(with: source, amount: 0.08))
         backgroundBottom = Color(uiColor: token.surface)
-        accent = Color(uiColor: progress)
-        primaryText = Color(uiColor: primary)
-        secondaryText = Color(uiColor: secondary)
+        accent = Color(uiColor: token.progress)
+        primaryText = Color(uiColor: token.primary)
+        secondaryText = Color(uiColor: token.secondary)
     }
 
     private struct TokenSet {
@@ -7488,52 +7714,43 @@ private struct PlayerImmersivePalette {
     }
 
     private enum Family {
-        case orange, yellow, lime, green, cyan, sky, blue, indigo, purple, rose, red, gray
+        case orangeRed, orangeYellow, yellow, green, cyan, sky, blue, indigo, purple, rose, red, gray
     }
 
     private static func tokenSet(hue: CGFloat, saturation: CGFloat, brightness: CGFloat) -> TokenSet {
         let family: Family
-        if saturation <= 0.03 || brightness <= 0.10 {
+        if saturation <= 0.04 || brightness <= 0.10 {
             family = .gray
-        } else if saturation < 0.12 {
-            switch hue {
-            case 0..<35, 330...360: family = .orange
-            case 35..<105: family = .yellow
-            case 105..<190: family = .cyan
-            case 190..<245: family = .sky
-            case 245..<300: family = .indigo
-            default: family = .rose
-            }
         } else {
             switch hue {
-            case 0..<10, 346...360: family = .red
-            case 10..<30: family = .orange
-            case 30..<65: family = .yellow
-            case 65..<110: family = .lime
-            case 110..<165: family = .green
-            case 165..<190: family = .cyan
-            case 190..<210: family = .sky
-            case 210..<240: family = .blue
-            case 240..<270: family = .indigo
-            case 270..<310: family = .purple
+            case 0...5, 340...360: family = .red
+            case 5..<20: family = .orangeRed
+            case 20..<40: family = .orangeYellow
+            case 40..<60: family = .yellow
+            case 60..<100: family = .green
+            case 100..<170: family = .cyan
+            case 170..<190: family = .sky
+            case 190..<230: family = .blue
+            case 230..<260: family = .indigo
+            case 260..<290: family = .purple
             default: family = .rose
             }
         }
 
         let values: (UInt32, UInt32, UInt32, UInt32)
         switch family {
-        case .orange: values = (0xFFFAF7, 0xEE6A0D, 0xDB6816, 0xFC7B54)
-        case .yellow: values = (0xFFFFF2, 0x80800D, 0xB3B31A, 0xA6AC3E)
-        case .lime: values = (0xF8FFF5, 0x47991F, 0x47B212, 0x73B054)
-        case .green: values = (0xF2FFFA, 0x008C59, 0x1AB37B, 0x43B58C)
-        case .cyan: values = (0xF0FDFF, 0x0F8799, 0x079CB2, 0x30C3DA)
-        case .sky: values = (0xF0FAFF, 0x0F6099, 0x1480CC, 0x64A5CE)
-        case .blue: values = (0xF0F5FF, 0x122DB2, 0x3D55CC, 0x4879D9)
-        case .indigo: values = (0xF5F0FF, 0x5C17E5, 0x8A5CE5, 0x9162EC)
-        case .purple: values = (0xFCF0FF, 0xAD14CC, 0xCF5CE5, 0xA93ECD)
-        case .rose: values = (0xFFF0FA, 0xCC0088, 0xE573BF, 0xD23192)
-        case .red: values = (0xFFF0F3, 0xB2001E, 0xE57386, 0xC9333B)
-        case .gray: values = (0xF7F7F7, 0x242424, 0x808080, 0x6B6C6D)
+        case .orangeRed: values = (0x391408, 0xFF6E3D, 0xD34C1F, 0xDC5F35)
+        case .orangeYellow: values = (0x1A1202, 0xFFC257, 0xE8AE59, 0xC8871F)
+        case .yellow: values = (0x1F1D03, 0xFFED2B, 0xE9C900, 0x9E9119)
+        case .green: values = (0x181D03, 0xC1FF20, 0xA6DC19, 0xA0D51B)
+        case .cyan: values = (0x041803, 0x31E623, 0x2EBB24, 0x28BF1D)
+        case .sky: values = (0x031C1E, 0x7AF2F8, 0x1DC1C9, 0x1DC1C9)
+        case .blue: values = (0x051022, 0x88B6FF, 0x3D7FEB, 0x3D7FEB)
+        case .indigo: values = (0x110C29, 0xD7CFFF, 0xB9ACFF, 0xB9ACFF)
+        case .purple: values = (0x110C29, 0xF29DFF, 0xD673E5, 0xC980D3)
+        case .rose: values = (0x1E0412, 0xF29DFF, 0xFF7DC3, 0xD69ABB)
+        case .red: values = (0x210505, 0xFF9799, 0xFF6E70, 0xD57A7C)
+        case .gray: values = (0x1C1C1C, 0xE7E7E7, 0xC4C4C4, 0xC0C0C0)
         }
         return TokenSet(
             surface: UIColor(rgb: values.0),
