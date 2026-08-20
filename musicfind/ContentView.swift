@@ -182,22 +182,6 @@ struct ContentView: View {
                 .opacity(chromeOpacity)
                 .zIndex(1)
 
-            if isPlaybackVisuallyActive {
-                MusicSparkleField(
-                    song: playerDisplaySong,
-                    preference: musicConnector.moodPreference,
-                    isPaused: isPlayerCardVisible
-                )
-                    .frame(width: proxy.size.width, height: min(proxy.size.height * 0.56, 520))
-                    .offset(y: 74)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-                .ignoresSafeArea(edges: .bottom)
-                .allowsHitTesting(false)
-                .blur(radius: sceneBackdropBlur, opaque: false)
-                .transition(.opacity.animation(.easeOut(duration: 0.22)))
-                .zIndex(4)
-            }
-
             VStack {
                 HStack(alignment: .top) {
                     VStack(alignment: .leading, spacing: 8) {
@@ -6078,6 +6062,7 @@ private struct FluidPlayerOverlay: View {
     let onSongChange: (DemoSong) -> Void
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var scenePhase
     @State private var currentIndex = 0
     @State private var targetIndex: Int?
     @State private var transitionProgress: CGFloat = 0
@@ -6098,7 +6083,7 @@ private struct FluidPlayerOverlay: View {
                 FluidPlayerBackdrop(
                     song: currentSong,
                     isPlaying: isPlaying,
-                    isMotionEnabled: !isTransitioning,
+                    isMotionEnabled: !isTransitioning && scenePhase == .active && isContentVisible,
                     detailMotionChannel: spatialMotion.detailChannel
                 )
 
@@ -6125,7 +6110,7 @@ private struct FluidPlayerOverlay: View {
 
                 FluidPlayerPage(
                     song: currentSong,
-                    isPlaying: isPlaying
+                    isPlaying: isPlaying && scenePhase == .active && isContentVisible
                 )
                 .offset(x: currentPageOffset(width: proxy.size.width))
                 .opacity(Double(currentPageOpacity))
@@ -6133,7 +6118,7 @@ private struct FluidPlayerOverlay: View {
                 if let targetSong {
                     FluidPlayerPage(
                         song: targetSong,
-                        isPlaying: isPlaying
+                        isPlaying: isPlaying && scenePhase == .active && isContentVisible
                     )
                     .offset(x: targetPageOffset(width: proxy.size.width))
                     .opacity(Double(targetPageOpacity))
@@ -6228,7 +6213,7 @@ private struct FluidPlayerOverlay: View {
         .onAppear {
             syncCurrentIndex()
             preloadNearbyArtwork()
-            if reduceMotion == false {
+            if reduceMotion == false, scenePhase == .active {
                 spatialMotion.start()
             }
         }
@@ -6243,10 +6228,17 @@ private struct FluidPlayerOverlay: View {
             spatialMotion.stop()
         }
         .onChange(of: reduceMotion) { _, isReduced in
-            if isReduced {
+            if isReduced || scenePhase != .active {
                 spatialMotion.stop()
             } else {
                 spatialMotion.start()
+            }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active, reduceMotion == false {
+                spatialMotion.start()
+            } else {
+                spatialMotion.stop()
             }
         }
     }
@@ -6501,7 +6493,6 @@ private struct PlayerCardSpatialTransform: ViewModifier {
                 perspective: 0.72
             )
             .scaleEffect(depthScale)
-            .animation(.linear(duration: 0.05), value: parallax)
     }
 }
 
@@ -6536,6 +6527,124 @@ private struct PlayerCardMotionChrome: View {
                 )
                 .padding(0.7)
                 .blendMode(.screen)
+        }
+    }
+}
+
+private struct PlayerCardDiffuseLight: View {
+    let song: DemoSong
+    let palette: PlayerImmersivePalette
+    let parallax: CGSize
+    let reduceMotion: Bool
+
+    @State private var isDrifting = false
+
+    var body: some View {
+        GeometryReader { proxy in
+            let width = max(proxy.size.width, 1)
+            let height = max(proxy.size.height, 1)
+            let secondaryColor = song.colors.dropFirst().first ?? palette.accent
+
+            ZStack {
+                LinearGradient(
+                    stops: [
+                        .init(color: song.magicColor.opacity(0.12), location: 0.00),
+                        .init(color: palette.accent.opacity(0.075), location: 0.38),
+                        .init(color: secondaryColor.opacity(0.085), location: 0.68),
+                        .init(color: .clear, location: 1.00)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+
+                Ellipse()
+                    .fill(
+                        RadialGradient(
+                            stops: [
+                                .init(color: .white.opacity(0.10), location: 0.00),
+                                .init(color: palette.primaryText.opacity(0.17), location: 0.16),
+                                .init(color: song.magicColor.opacity(0.22), location: 0.40),
+                                .init(color: secondaryColor.opacity(0.11), location: 0.69),
+                                .init(color: .clear, location: 1.00)
+                            ],
+                            center: .center,
+                            startRadius: 0,
+                            endRadius: width * 0.56
+                        )
+                    )
+                    .frame(width: width * 1.16, height: height * 0.62)
+                    .blur(radius: 34)
+                    .drawingGroup(opaque: false, colorMode: .nonLinear)
+                    .position(
+                        x: width * 0.24 + parallax.width * 30,
+                        y: height * 0.36 + parallax.height * 22
+                    )
+                    .offset(
+                        x: isDrifting ? width * 0.07 : -width * 0.05,
+                        y: isDrifting ? height * 0.025 : -height * 0.018
+                    )
+                    .scaleEffect(isDrifting ? 1.06 : 0.96)
+                    .animation(
+                        .easeInOut(duration: 6.4).repeatForever(autoreverses: true),
+                        value: isDrifting
+                    )
+
+                Ellipse()
+                    .fill(
+                        RadialGradient(
+                            stops: [
+                                .init(color: secondaryColor.opacity(0.18), location: 0.00),
+                                .init(color: palette.accent.opacity(0.16), location: 0.34),
+                                .init(color: song.magicColor.opacity(0.075), location: 0.66),
+                                .init(color: .clear, location: 1.00)
+                            ],
+                            center: .center,
+                            startRadius: 0,
+                            endRadius: width * 0.48
+                        )
+                    )
+                    .frame(width: width * 0.94, height: height * 0.56)
+                    .blur(radius: 40)
+                    .drawingGroup(opaque: false, colorMode: .nonLinear)
+                    .position(
+                        x: width * 0.78 - parallax.width * 25,
+                        y: height * 0.46 - parallax.height * 18
+                    )
+                    .offset(
+                        x: isDrifting ? -width * 0.06 : width * 0.05,
+                        y: isDrifting ? -height * 0.02 : height * 0.025
+                    )
+                    .scaleEffect(isDrifting ? 0.95 : 1.05)
+                    .animation(
+                        .easeInOut(duration: 7.2).repeatForever(autoreverses: true),
+                        value: isDrifting
+                    )
+            }
+            .blendMode(.screen)
+            .mask {
+                LinearGradient(
+                    stops: [
+                        .init(color: .clear, location: 0.00),
+                        .init(color: .clear, location: 0.20),
+                        .init(color: .white.opacity(0.28), location: 0.30),
+                        .init(color: .white, location: 0.43),
+                        .init(color: .white, location: 0.58),
+                        .init(color: .white.opacity(0.62), location: 0.68),
+                        .init(color: .white.opacity(0.16), location: 0.78),
+                        .init(color: .clear, location: 0.88)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .allowsHitTesting(false)
+        .onAppear {
+            isDrifting = !reduceMotion
+        }
+        .onChange(of: reduceMotion) { _, isReduced in
+            isDrifting = !isReduced
         }
     }
 }
@@ -6576,10 +6685,13 @@ private struct FluidPlayerBackdrop: View {
     let song: DemoSong
     let isPlaying: Bool
     let isMotionEnabled: Bool
-    let detailMotionChannel: SpatialMotionChannel
+    @ObservedObject var detailMotionChannel: SpatialMotionChannel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         let palette = PlayerPaletteCache.shared.palette(for: song)
+        let shouldReduceMotion = reduceMotion || !isMotionEnabled
+        let parallax = shouldReduceMotion ? CGSize.zero : detailMotionChannel.parallax
 
         GeometryReader { proxy in
             let artworkHeight = proxy.size.height * 0.70
@@ -6653,6 +6765,13 @@ private struct FluidPlayerBackdrop: View {
                         .frame(height: proxy.size.height * 0.60)
                 }
 
+                PlayerCardDiffuseLight(
+                    song: song,
+                    palette: palette,
+                    parallax: parallax,
+                    reduceMotion: shouldReduceMotion
+                )
+
                 VStack(spacing: 0) {
                     Spacer(minLength: 0)
 
@@ -6718,7 +6837,7 @@ private struct PlayerCardWaveLights: View {
 
         TimelineView(
             .animation(
-                minimumInterval: 1.0 / 18.0,
+                minimumInterval: 1.0 / 12.0,
                 paused: !isMotionEnabled || !isPlaying
             )
         ) { timeline in
@@ -7239,7 +7358,7 @@ private final class SpatialArtworkMotionObserver {
         guard manager.isDeviceMotionAvailable, manager.isDeviceMotionActive == false else { return }
         baseline = nil
         smoothed = transformChannel.parallax
-        manager.deviceMotionUpdateInterval = 1.0 / 30.0
+        manager.deviceMotionUpdateInterval = 1.0 / 24.0
         manager.startDeviceMotionUpdates(to: .main) { [weak self] deviceMotion, _ in
             guard let self, let gravity = deviceMotion?.gravity else { return }
             if baseline == nil {
@@ -7262,8 +7381,8 @@ private final class SpatialArtworkMotionObserver {
                 abs(smoothed.width - lastTransformPublished.width),
                 abs(smoothed.height - lastTransformPublished.height)
             )
-            if transformDelta >= 0.008,
-               now.timeIntervalSince(lastTransformPublishTime) >= 1.0 / 30.0 {
+            if transformDelta >= 0.010,
+               now.timeIntervalSince(lastTransformPublishTime) >= 1.0 / 24.0 {
                 lastTransformPublished = smoothed
                 lastTransformPublishTime = now
                 transformChannel.parallax = smoothed
@@ -7602,7 +7721,7 @@ private struct RotatingPlayerArtwork: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 20.0, paused: !isPlaying || reduceMotion)) { timeline in
+        TimelineView(.animation(minimumInterval: 1.0 / 15.0, paused: !isPlaying || reduceMotion)) { timeline in
             let elapsed = timeline.date.timeIntervalSinceReferenceDate
             let rotation = reduceMotion ? 0 : elapsed.truncatingRemainder(dividingBy: 12) / 12 * 360
 
@@ -7766,19 +7885,38 @@ private struct PlayerImmersivePalette {
 private final class PlayerPaletteCache {
     static let shared = PlayerPaletteCache()
 
-    private var palettes: [Int: PlayerImmersivePalette] = [:]
+    private struct Key: Hashable {
+        let songID: Int
+        let red: UInt8
+        let green: UInt8
+        let blue: UInt8
+    }
+
+    private var palettes: [Key: PlayerImmersivePalette] = [:]
 
     private init() {}
 
     func palette(for song: DemoSong) -> PlayerImmersivePalette {
-        if let palette = palettes[song.id] {
+        let source = UIColor(songPalette: [song.magicColor])
+        var red: CGFloat = 0
+        var green: CGFloat = 0
+        var blue: CGFloat = 0
+        source.getRed(&red, green: &green, blue: &blue, alpha: nil)
+        let key = Key(
+            songID: song.id,
+            red: UInt8((min(max(red, 0), 1) * 255).rounded()),
+            green: UInt8((min(max(green, 0), 1) * 255).rounded()),
+            blue: UInt8((min(max(blue, 0), 1) * 255).rounded())
+        )
+
+        if let palette = palettes[key] {
             return palette
         }
         let palette = PlayerImmersivePalette(accentColor: song.magicColor)
         if palettes.count >= 256 {
             palettes.removeAll(keepingCapacity: true)
         }
-        palettes[song.id] = palette
+        palettes[key] = palette
         return palette
     }
 }
@@ -9367,7 +9505,7 @@ private struct PlayerPillOrbitingRimLight: View {
     let isMotionEnabled: Bool
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 18.0, paused: !isMotionEnabled)) { timeline in
+        TimelineView(.animation(minimumInterval: 1.0 / 12.0, paused: !isMotionEnabled)) { timeline in
             let time = timeline.date.timeIntervalSinceReferenceDate
             let speed = 0.055 + song.rhythmEnergy * 0.025
             let progress = positiveModulo(time * speed + randomUnit(salt: 0.43), 1)
@@ -9586,7 +9724,7 @@ private struct PlayerPillRhythmLights: View {
     var body: some View {
         TimelineView(
             .animation(
-                minimumInterval: 1.0 / 24.0,
+                minimumInterval: 1.0 / 15.0,
                 paused: !isMotionEnabled || !isPlaying
             )
         ) { timeline in
@@ -10150,42 +10288,35 @@ private extension UIImage {
                 brightness: brightness
             )
         }
-        guard let largest = samples.max(by: { $0.count < $1.count }) else { return nil }
-        let totalPixels = max(samples.reduce(0) { $0 + $1.count }, 1)
-        let eligible = samples.filter { $0.saturation >= 0.12 && $0.brightness >= 0.12 }
+        guard samples.isEmpty == false else { return nil }
 
-        var winningFamily: [ArtworkColorSample] = []
-        var winningScore: CGFloat = 0
-        var winningCount = 0
-        for center in eligible {
-            let family = eligible.filter {
-                let rawDistance = abs($0.hue - center.hue)
-                return min(rawDistance, 1 - rawDistance) * 360 <= 36
-            }
-            let familyCount = family.reduce(0) { $0 + $1.count }
-            guard CGFloat(familyCount) / CGFloat(totalPixels) >= 0.08 else { continue }
-            let score = family.reduce(CGFloat.zero) { $0 + $1.visualScore }
-            if score > winningScore {
-                winningFamily = family
-                winningScore = score
-                winningCount = familyCount
+        func familyIndex(for sample: ArtworkColorSample) -> Int {
+            guard sample.saturation > 0.04, sample.brightness > 0.10 else { return 11 }
+            switch sample.hue * 360 {
+            case 0...5, 340...360: return 10
+            case 5..<20: return 0
+            case 20..<40: return 1
+            case 40..<60: return 2
+            case 60..<100: return 3
+            case 100..<170: return 4
+            case 170..<190: return 5
+            case 190..<230: return 6
+            case 230..<260: return 7
+            case 260..<290: return 8
+            default: return 9
             }
         }
 
-        let softBaseIsPreferred = largest.saturation > 0.03
-            && largest.saturation < 0.12
-            && largest.brightness > 0.60
-            && CGFloat(largest.count) / CGFloat(totalPixels) >= 0.08
-            && CGFloat(largest.count) >= CGFloat(winningCount) * 1.6
-        if softBaseIsPreferred || winningFamily.isEmpty {
-            return UIColor(red: largest.red, green: largest.green, blue: largest.blue, alpha: 1)
-        }
+        let grouped = Dictionary(grouping: samples) { familyIndex(for: $0) }
+        guard let dominantFamily = grouped.values.max(by: { lhs, rhs in
+            lhs.reduce(0) { $0 + $1.count } < rhs.reduce(0) { $0 + $1.count }
+        }) else { return nil }
 
-        let weight = max(winningFamily.reduce(CGFloat.zero) { $0 + $1.visualScore }, 0.001)
+        let weight = max(CGFloat(dominantFamily.reduce(0) { $0 + $1.count }), 1)
         return UIColor(
-            red: winningFamily.reduce(CGFloat.zero) { $0 + $1.red * $1.visualScore } / weight,
-            green: winningFamily.reduce(CGFloat.zero) { $0 + $1.green * $1.visualScore } / weight,
-            blue: winningFamily.reduce(CGFloat.zero) { $0 + $1.blue * $1.visualScore } / weight,
+            red: dominantFamily.reduce(CGFloat.zero) { $0 + $1.red * CGFloat($1.count) } / weight,
+            green: dominantFamily.reduce(CGFloat.zero) { $0 + $1.green * CGFloat($1.count) } / weight,
+            blue: dominantFamily.reduce(CGFloat.zero) { $0 + $1.blue * CGFloat($1.count) } / weight,
             alpha: 1
         )
     }
@@ -10948,7 +11079,7 @@ private struct PlaceholderCardLoadingSweep: View {
     let seed: Int
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 24.0)) { timeline in
+        TimelineView(.animation(minimumInterval: 1.0 / 12.0)) { timeline in
             let phaseSeed = Double(abs(seed % 23)) * 0.037
             let phase = positiveModulo(timeline.date.timeIntervalSinceReferenceDate * 0.30 + phaseSeed, 1)
 
