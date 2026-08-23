@@ -6090,8 +6090,10 @@ private struct FluidPlayerOverlay: View {
     @State private var transitionProgress: CGFloat = 0
     @State private var transitionDirection: CGFloat = 1
     @State private var dragOffset: CGFloat = 0
+    @State private var verticalDragOffset: CGFloat = 0
     @State private var swipeAxis: SwipeAxis?
     @State private var isSwipeInteracting = false
+    @State private var isSwipeDismissing = false
     @State private var transitionTask: Task<Void, Never>?
     @State private var playbackHandoffTask: Task<Void, Never>?
     @State private var spatialMotion = SpatialArtworkMotionObserver()
@@ -6243,7 +6245,8 @@ private struct FluidPlayerOverlay: View {
             )
         )
         .offset(x: dragOffset * 0.12)
-        .opacity(isContentVisible ? 1 : 0)
+        .offset(y: verticalDragOffset)
+        .opacity(isContentVisible ? verticalSwipeOpacity : 0)
         .scaleEffect(isContentVisible ? 1 : 0.985)
         .animation(.easeOut(duration: 0.18), value: isContentVisible)
         .shadow(
@@ -6300,6 +6303,10 @@ private struct FluidPlayerOverlay: View {
         targetIndex != nil
     }
 
+    private var verticalSwipeOpacity: Double {
+        1 - min(Double(abs(verticalDragOffset) / 520), 0.76)
+    }
+
     private var currentSong: DemoSong {
         guard isTransitioning, songs.indices.contains(currentIndex) else {
             return nowPlaying
@@ -6337,18 +6344,18 @@ private struct FluidPlayerOverlay: View {
     }
 
     private func playerSwipeGesture() -> some Gesture {
-        DragGesture(minimumDistance: 14, coordinateSpace: .local)
+        DragGesture(minimumDistance: 14, coordinateSpace: .global)
             .onChanged { value in
-                guard !isTransitioning else { return }
+                guard !isTransitioning, !isSwipeDismissing else { return }
                 let horizontal = value.translation.width
                 let vertical = value.translation.height
                 if swipeAxis == nil {
                     let horizontalDistance = abs(horizontal)
                     let verticalDistance = abs(vertical)
-                    if horizontalDistance > verticalDistance * 1.12 {
-                        swipeAxis = .horizontal
-                    } else if verticalDistance > horizontalDistance * 1.28 {
-                        swipeAxis = .vertical
+                    if max(horizontalDistance, verticalDistance) >= 10 {
+                        swipeAxis = horizontalDistance > verticalDistance * 1.35
+                            ? .horizontal
+                            : .vertical
                     }
                 }
                 if swipeAxis != nil, isSwipeInteracting == false {
@@ -6357,6 +6364,11 @@ private struct FluidPlayerOverlay: View {
                 }
                 if swipeAxis == .vertical {
                     dragOffset = 0
+                    var transaction = Transaction()
+                    transaction.animation = nil
+                    withTransaction(transaction) {
+                        verticalDragOffset = max(min(vertical, 420), -420)
+                    }
                     return
                 }
                 if swipeAxis == .horizontal {
@@ -6365,18 +6377,17 @@ private struct FluidPlayerOverlay: View {
             }
             .onEnded { value in
                 defer { swipeAxis = nil }
-                guard !isTransitioning else { return }
-                let horizontalIntent = max(abs(value.translation.width), abs(value.predictedEndTranslation.width) * 0.55)
-                let verticalIntent = max(abs(value.translation.height), abs(value.predictedEndTranslation.height) * 0.55)
-                let resolvedAxis: SwipeAxis = horizontalIntent >= verticalIntent * 0.90
-                    ? .horizontal
-                    : (swipeAxis ?? .vertical)
-                if resolvedAxis == .vertical {
-                    dragOffset = 0
-                    finishDismissDrag(value)
+                guard !isTransitioning, !isSwipeDismissing else { return }
+                guard let resolvedAxis = swipeAxis else {
                     resumeSwipeMotionIfNeeded()
                     return
                 }
+                if resolvedAxis == .vertical {
+                    dragOffset = 0
+                    finishDismissDrag(value)
+                    return
+                }
+                verticalDragOffset = 0
                 finishDrag(value)
             }
     }
@@ -6384,16 +6395,28 @@ private struct FluidPlayerOverlay: View {
     private func finishDismissDrag(_ value: DragGesture.Value) {
         let translation = value.translation.height
         let predicted = value.predictedEndTranslation.height
-        guard translation > 92 || predicted > 170 else {
+        let direction: CGFloat = (translation == 0 ? predicted : translation) >= 0 ? 1 : -1
+        let shouldDismiss = abs(translation) > 92 || abs(predicted) > 170
+        guard shouldDismiss else {
+            withAnimation(.smooth(duration: 0.24, extraBounce: 0.08)) {
+                verticalDragOffset = 0
+            }
+            resumeSwipeMotionIfNeeded()
             return
         }
 
+        isSwipeDismissing = true
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
-        onSwipeDismiss()
+        withAnimation(.easeOut(duration: 0.24)) {
+            verticalDragOffset = direction * 1_200
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
+            onSwipeDismiss()
+        }
     }
 
     private func handlePlaybackTap() {
-        guard !isTransitioning else { return }
+        guard !isTransitioning, !isSwipeInteracting, !isSwipeDismissing else { return }
         onTogglePlayback()
         UIImpactFeedbackGenerator(style: .light).impactOccurred(intensity: 0.65)
     }
