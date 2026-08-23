@@ -14,6 +14,8 @@ import Combine
 import MediaPlayer
 import MusicKit
 import AVFoundation
+import CoreLocation
+import Photos
 
 struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
@@ -119,6 +121,15 @@ struct ContentView: View {
             Color(red: 0.0, green: 0.027, blue: 0.098)
                 .ignoresSafeArea()
 
+            if activeTab == .settings {
+                ProfilePage(connector: musicConnector) {
+                    withAnimation(.smooth(duration: 0.24, extraBounce: 0.0)) {
+                        activeTab = .home
+                    }
+                }
+                .transition(.opacity)
+                .zIndex(20)
+            } else {
             ScrollView(showsIndicators: false) {
                 HStack(alignment: .top, spacing: spacing) {
                     ForEach(Array(0..<homeColumnCount), id: \.self) { column in
@@ -132,6 +143,7 @@ struct ContentView: View {
                                     gravity: homeCoverGravity(for: slot, columnCount: homeColumnCount),
                                     isFlipping: isHomeFlipping && homeFlippingIndices.contains(slot.id),
                                     isAppearing: homeAppearingFlipIndices.contains(slot.id),
+                                    isMotionPaused: isPlayerCardVisible || scenePhase != .active,
                                     flipGeneration: homeFlipGeneration,
                                     variation: homeFlipVariations[slot.id] ?? .zero,
                                     onTap: {
@@ -253,9 +265,10 @@ struct ContentView: View {
                 .zIndex(9)
             }
 
-            VStack {
-                Spacer()
-                BottomNavigationBar(
+            if isPlayerPillHiddenForExpansion == false {
+                VStack {
+                    Spacer()
+                    BottomNavigationBar(
                     nowPlaying: playerDisplaySong,
                     isPlaying: musicConnector.isPlaying,
                     isPlaybackLoading: musicConnector.isPlaybackTransitioning,
@@ -275,18 +288,19 @@ struct ContentView: View {
                     onMoodSeek: { direction in
                         playMoodMatchedSong(direction: direction)
                     }
-                )
-                .padding(.horizontal, 8)
-                .padding(.bottom, 12)
+                    )
+                    .padding(.horizontal, 8)
+                    .padding(.bottom, 12)
+                }
+                .blur(radius: isPlayerCardVisible ? 0 : sceneBackdropBlur, opaque: false)
+                .opacity(isPlayerCardVisible ? 0 : 1)
+                .offset(y: isPlayerCardVisible ? 36 : 0)
+                .allowsHitTesting(isPlayerCardVisible == false)
+                .accessibilityHidden(isPlayerCardVisible)
+                .animation(.smooth(duration: 0.24, extraBounce: 0.0), value: activeTab)
+                .animation(.smooth(duration: 0.24, extraBounce: 0.0), value: isPlayerCardVisible)
+                .zIndex(8)
             }
-            .blur(radius: isPlayerCardVisible ? 0 : sceneBackdropBlur, opaque: false)
-            .opacity(isPlayerCardVisible ? 0 : 1)
-            .offset(y: isPlayerCardVisible ? 36 : 0)
-            .allowsHitTesting(isPlayerCardVisible == false)
-            .accessibilityHidden(isPlayerCardVisible)
-            .animation(.smooth(duration: 0.24, extraBounce: 0.0), value: activeTab)
-            .animation(.smooth(duration: 0.24, extraBounce: 0.0), value: isPlayerCardVisible)
-            .zIndex(8)
 
             if isInitialLibraryLoadingVisible {
                 InitialLibraryLoadingOverlay()
@@ -294,24 +308,6 @@ struct ContentView: View {
                     .zIndex(10)
             }
 
-            if activeTab == .settings {
-                Color.black.opacity(0.48)
-                    .ignoresSafeArea()
-                    .zIndex(11)
-                    .onTapGesture {
-                        withAnimation(.smooth(duration: 0.24, extraBounce: 0.0)) {
-                            activeTab = .home
-                        }
-                    }
-
-                SettingsModalView(connector: musicConnector) {
-                    withAnimation(.smooth(duration: 0.24, extraBounce: 0.0)) {
-                        activeTab = .home
-                    }
-                }
-                .padding(.horizontal, 12)
-                .transition(.scale(scale: 0.94).combined(with: .opacity))
-                .zIndex(12)
             }
         }
         .coordinateSpace(name: "contentRoot")
@@ -325,9 +321,11 @@ struct ContentView: View {
             syncHomeSongsIfNeeded()
             shakeObserver.start()
             scheduleHomeIdleDrift()
+            updateIdleTimerState()
         }
         .onChange(of: scenePhase) { _, newPhase in
             musicConnector.handleScenePhase(newPhase)
+            updateIdleTimerState()
         }
         .onDisappear {
             musicConnector.stopPlaybackSync()
@@ -336,6 +334,7 @@ struct ContentView: View {
             resetHomeFlipState()
             stopHomeDrift()
             shakeObserver.stop()
+            UIApplication.shared.isIdleTimerDisabled = false
         }
         .onReceive(musicConnector.$currentSong.compactMap { $0 }) { song in
             guard song.id != nowPlaying.id else { return }
@@ -349,6 +348,7 @@ struct ContentView: View {
             }
         }
         .onChange(of: isPlayerCardVisible) { _, isVisible in
+            updateIdleTimerState()
             if isVisible {
                 stopHomeDrift()
                 shakeObserver.stop()
@@ -378,8 +378,13 @@ struct ContentView: View {
                 isPlayerCardVisible = false
                 isPlayerCardExpanded = false
                 isPlayerCardContentVisible = false
+                isPlayerPillHiddenForExpansion = false
             }
         }
+    }
+
+    private func updateIdleTimerState() {
+        UIApplication.shared.isIdleTimerDisabled = isPlayerCardVisible && scenePhase == .active
     }
 
     private func playHomeSong(_ song: DemoSong) {
@@ -514,7 +519,9 @@ struct ContentView: View {
         activeTab = .player
         isPlayerCardContentVisible = false
         isPlayerCardDismissing = false
+        isPlayerPillHiddenForExpansion = false
         isPlayerCardVisible = true
+        UIApplication.shared.isIdleTimerDisabled = true
         ensureHomeHasEnoughSongsIfNeeded()
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) {
@@ -523,10 +530,16 @@ struct ContentView: View {
                 isPlayerCardContentVisible = true
             }
         }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.26) {
+            guard isPlayerCardVisible, isPlayerCardDismissing == false else { return }
+            isPlayerPillHiddenForExpansion = true
+        }
     }
 
     private func hidePlayerCard() {
         guard isPlayerCardVisible else { return }
+        UIApplication.shared.isIdleTimerDisabled = false
+        isPlayerPillHiddenForExpansion = false
 
         withAnimation(.easeOut(duration: 0.18)) {
             isPlayerCardDismissing = true
@@ -541,6 +554,8 @@ struct ContentView: View {
     private func completePlayerCardDismiss() {
         guard isPlayerCardVisible else { return }
 
+        UIApplication.shared.isIdleTimerDisabled = false
+
         var transaction = Transaction()
         transaction.disablesAnimations = true
         withTransaction(transaction) {
@@ -550,6 +565,7 @@ struct ContentView: View {
         }
 
         isPlayerCardDismissing = false
+        isPlayerPillHiddenForExpansion = false
         playerCardPlaybackSongs = []
     }
 
@@ -1723,19 +1739,45 @@ private struct InitialLibraryLoadingOverlay: View {
 
 private struct ProfilePage: View {
     @ObservedObject var connector: MusicConnectionManager
-    @Binding var activeTab: AppTab
+    let onClose: () -> Void
     @State private var isPrivacyPolicyPresented = false
 
     var body: some View {
         GeometryReader { proxy in
             VStack(spacing: 0) {
+                HStack {
+                    Button(action: onClose) {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 17, weight: .bold))
+                            .foregroundStyle(.white.opacity(0.90))
+                            .frame(width: 40, height: 40)
+                            .background(.white.opacity(0.10), in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("返回首页")
+
+                    Spacer()
+
+                    Text("我的音乐")
+                        .font(.system(size: 22, weight: .bold))
+                        .foregroundStyle(.white)
+
+                    Spacer()
+
+                    Color.clear
+                        .frame(width: 40, height: 40)
+                }
+                .frame(height: 44)
+                .padding(.horizontal, 20)
+                .padding(.top, proxy.safeAreaInsets.top)
+                .offset(y: -45)
+
                 BadgePhysicsPanel(songs: connector.discoverySongs)
-                    .frame(height: proxy.size.height * 0.42)
-                    .padding(.top, proxy.safeAreaInsets.top + 18)
-                    .offset(y: 10)
+                    .frame(height: min(180, proxy.size.height * 0.24))
+                    .padding(.top, 15)
                     .padding(.bottom, 0)
-                    .zIndex(0)
                     .allowsHitTesting(false)
+                    .offset(y: -75)
 
                 SettingsContentStack(connector: connector) {
                     MusicConnectionControl(
@@ -1752,7 +1794,7 @@ private struct ProfilePage: View {
                                 await connector.connectAppleMusic()
                                 if connector.isAppleMusicReady {
                                     withAnimation(.smooth(duration: 0.22, extraBounce: 0.0)) {
-                                        activeTab = .home
+                                        onClose()
                                     }
                                 }
                             }
@@ -1770,7 +1812,7 @@ private struct ProfilePage: View {
                         UIImpactFeedbackGenerator(style: .medium).impactOccurred(intensity: 0.70)
                         if connector.playArtistRadio(artistID: artistID) {
                             withAnimation(.smooth(duration: 0.22, extraBounce: 0.0)) {
-                                activeTab = .home
+                                onClose()
                             }
                         }
                     }
@@ -1787,17 +1829,27 @@ private struct ProfilePage: View {
                             .padding(.top, 4)
                     }
                 }
-                .zIndex(1)
-                .padding(.horizontal, 18)
-                .padding(.top, 28)
-
-                Spacer(minLength: 120)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding(.horizontal, 20)
+                .padding(.top, 4)
+                .offset(y: -75)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .sheet(isPresented: $isPrivacyPolicyPresented) {
             PrivacyPolicyView()
         }
+        .background(
+            LinearGradient(
+                colors: [
+                    Color(red: 0.025, green: 0.16, blue: 0.11),
+                    Color(red: 0.11, green: 0.11, blue: 0.12)
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .ignoresSafeArea()
+        )
     }
 }
 
@@ -2010,53 +2062,16 @@ private struct MusicConnectButton: View {
 private struct SettingsContentStack<Content: View>: View {
     @ObservedObject var connector: MusicConnectionManager
     @ViewBuilder let content: Content
-    @State private var lastHapticOffset: CGFloat = 0
-    @State private var lastDragHapticTranslation: CGFloat = 0
-    private let hapticStep: CGFloat = 10
 
     var body: some View {
         ScrollView(showsIndicators: false) {
-            GeometryReader { proxy in
-                Color.clear
-                    .preference(
-                        key: SettingsScrollOffsetPreferenceKey.self,
-                        value: proxy.frame(in: .named("settingsContentScroll")).minY
-                    )
-            }
-            .frame(height: 0)
-
             VStack(spacing: 12) {
                 content
             }
             .padding(.top, 2)
             .padding(.bottom, 26)
         }
-        .coordinateSpace(name: "settingsContentScroll")
         .scrollBounceBehavior(.basedOnSize)
-        .onPreferenceChange(SettingsScrollOffsetPreferenceKey.self) { offset in
-            guard abs(offset - lastHapticOffset) >= hapticStep else { return }
-            lastHapticOffset = offset
-            UIImpactFeedbackGenerator(style: .rigid).impactOccurred(intensity: 0.70)
-        }
-        .simultaneousGesture(
-            DragGesture(minimumDistance: 3)
-                .onChanged { value in
-                    guard abs(value.translation.height - lastDragHapticTranslation) >= hapticStep else { return }
-                    lastDragHapticTranslation = value.translation.height
-                    UIImpactFeedbackGenerator(style: .rigid).impactOccurred(intensity: 0.58)
-                }
-                .onEnded { _ in
-                    lastDragHapticTranslation = 0
-                }
-        )
-    }
-}
-
-private struct SettingsScrollOffsetPreferenceKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
     }
 }
 
@@ -2167,6 +2182,8 @@ private struct PlaylistCuratorPanel: View {
                     }
                 }
                 .pickerStyle(.segmented)
+                .tint(.white)
+                .environment(\.colorScheme, .dark)
                 .frame(width: 154)
             }
 
@@ -2239,14 +2256,15 @@ private struct CuratedPlaylistSheet: View {
                 }
 
                 ToolbarItem(placement: .topBarTrailing) {
-                    Picker("歌曲数量", selection: $selectedCount) {
-                        ForEach(PlaylistCurator.supportedCounts, id: \.self) { count in
-                            Text("\(count) 首").tag(count)
-                        }
+                    Button {
+                        UIImpactFeedbackGenerator(style: .medium).impactOccurred(intensity: 0.72)
+                        guard connector.playCuratedPlaylist() else { return }
+                        dismiss()
+                    } label: {
+                        Label("一键播放", systemImage: "play.fill")
+                            .font(.system(size: 14, weight: .bold))
                     }
-                    .onChange(of: selectedCount) { _, count in
-                        connector.curatePlaylist(count: count)
-                    }
+                    .accessibilityLabel("一键播放整个列表")
                 }
             }
             .toolbarBackground(.black.opacity(0.82), for: .navigationBar)
@@ -2437,7 +2455,7 @@ private struct PrivacyPolicyView: View {
 
                     policySection(
                         title: "网络服务",
-                        text: "为补充专辑封面和音乐信息，App 可能会向 Apple 的 iTunes Search 服务发送歌曲名和歌手名。歌词只会从 Apple Music 媒体条目在设备内读取，不会发送给外部歌词服务。"
+                        text: "为补充专辑封面和音乐信息，App 可能会向 Apple 的 iTunes Search 服务发送歌曲名和歌手名。为提供同步歌词，App 会将当前歌曲的歌曲名、歌手名、专辑名和可用时长发送给第三方歌词服务 LRCLIB（lrclib.net），仅用于匹配歌词。歌词请求不会包含 Apple 账号、Apple Music 媒体库列表、播放次数或最近播放记录。"
                     )
 
                     policySection(
@@ -5391,7 +5409,9 @@ private struct BadgePhysicsPanel: View {
 
     private let frameRate = Timer.publish(every: 1.0 / 20.0, on: .main, in: .common).autoconnect()
     private let minimumVisualMovement: CGFloat = 1.8
-    private let sleepVelocity: CGFloat = 14
+    private let sleepVelocity: CGFloat = 4
+    private let gravityStrength: CGFloat = 260
+    private let maximumSpeed: CGFloat = 92
 
     var body: some View {
         GeometryReader { proxy in
@@ -5423,7 +5443,7 @@ private struct BadgePhysicsPanel: View {
 
     private var panelSongs: [DemoSong] {
         let source = songs.isEmpty ? DemoSong.library : songs
-        return Array(source.prefix(16))
+        return Array(source.prefix(15))
     }
 
     private func resetBadges(in size: CGSize, force: Bool = false) {
@@ -5441,8 +5461,8 @@ private struct BadgePhysicsPanel: View {
                 id: song.id,
                 radius: radius,
                 song: song,
-                position: CGPoint(x: size.width * column, y: 44 + row * 50),
-                velocity: CGPoint(x: CGFloat(index % 2 == 0 ? 40 : -34), y: CGFloat(index % 3 == 0 ? 20 : -24))
+                position: CGPoint(x: size.width * column, y: 36 + row * 54),
+                velocity: CGPoint(x: CGFloat(index % 2 == 0 ? 20 : -18), y: CGFloat(index % 3 == 0 ? 12 : -14))
             )
         }
     }
@@ -5454,13 +5474,15 @@ private struct BadgePhysicsPanel: View {
         var strongestImpact: CGFloat = 0
         var largestMovement: CGFloat = 0
         let gravity = motion.gravity
-        let acceleration = CGPoint(x: CGFloat(gravity.x) * 420, y: CGFloat(-gravity.y) * 420)
+        let acceleration = CGPoint(x: CGFloat(gravity.x) * gravityStrength, y: CGFloat(-gravity.y) * gravityStrength)
         let dt: CGFloat = 1.0 / 20.0
-        let damping: CGFloat = 0.94
+        let damping: CGFloat = 0.90
 
         for index in next.indices {
             next[index].velocity.x = (next[index].velocity.x + acceleration.x * dt) * damping
             next[index].velocity.y = (next[index].velocity.y + acceleration.y * dt) * damping
+            next[index].velocity.x = min(max(next[index].velocity.x, -maximumSpeed), maximumSpeed)
+            next[index].velocity.y = min(max(next[index].velocity.y, -maximumSpeed), maximumSpeed)
             if abs(next[index].velocity.x) < sleepVelocity {
                 next[index].velocity.x = 0
             }
@@ -5480,21 +5502,21 @@ private struct BadgePhysicsPanel: View {
             if next[index].position.x < radius {
                 strongestImpact = max(strongestImpact, abs(next[index].velocity.x))
                 next[index].position.x = radius
-                next[index].velocity.x = abs(next[index].velocity.x) * 0.80
+                next[index].velocity.x = abs(next[index].velocity.x) * 0.48
             } else if next[index].position.x > size.width - radius {
                 strongestImpact = max(strongestImpact, abs(next[index].velocity.x))
                 next[index].position.x = size.width - radius
-                next[index].velocity.x = -abs(next[index].velocity.x) * 0.80
+                next[index].velocity.x = -abs(next[index].velocity.x) * 0.48
             }
 
             if next[index].position.y < radius {
                 strongestImpact = max(strongestImpact, abs(next[index].velocity.y))
                 next[index].position.y = radius
-                next[index].velocity.y = abs(next[index].velocity.y) * 0.80
+                next[index].velocity.y = abs(next[index].velocity.y) * 0.48
             } else if next[index].position.y > size.height - radius {
                 strongestImpact = max(strongestImpact, abs(next[index].velocity.y))
                 next[index].position.y = size.height - radius
-                next[index].velocity.y = -abs(next[index].velocity.y) * 0.80
+                next[index].velocity.y = -abs(next[index].velocity.y) * 0.48
             }
         }
 
@@ -5532,7 +5554,7 @@ private struct BadgePhysicsPanel: View {
         let speed = relativeVelocity.x * normal.x + relativeVelocity.y * normal.y
         guard speed < 0 else { return 0 }
 
-        let impulse = -speed * 0.82
+        let impulse = -speed * 0.48
         badges[left].velocity.x -= normal.x * impulse
         badges[left].velocity.y -= normal.y * impulse
         badges[right].velocity.x += normal.x * impulse
@@ -5590,8 +5612,8 @@ private final class MotionGravityObserver: ObservableObject {
     private let manager = CMMotionManager()
     private var lastPublishedGravity = CMAcceleration(x: 0, y: -0.75, z: 0)
     private var lastPublishTime = Date.distantPast
-    private let gravityDeadband = 0.16
-    private let minimumPublishInterval: TimeInterval = 1.0 / 8.0
+    private let gravityDeadband = 0.20
+    private let minimumPublishInterval: TimeInterval = 1.0 / 10.0
 
     func start() {
         guard manager.isDeviceMotionAvailable else { return }
@@ -6069,9 +6091,11 @@ private struct FluidPlayerOverlay: View {
     @State private var transitionDirection: CGFloat = 1
     @State private var dragOffset: CGFloat = 0
     @State private var swipeAxis: SwipeAxis?
+    @State private var isSwipeInteracting = false
     @State private var transitionTask: Task<Void, Never>?
     @State private var playbackHandoffTask: Task<Void, Never>?
     @State private var spatialMotion = SpatialArtworkMotionObserver()
+    @State private var isShareComposerPresented = false
 
     private var transitionDuration: Double { reduceMotion ? 0.22 : 0.56 }
     var body: some View {
@@ -6083,7 +6107,7 @@ private struct FluidPlayerOverlay: View {
                 FluidPlayerBackdrop(
                     song: currentSong,
                     isPlaying: isPlaying,
-                    isMotionEnabled: !isTransitioning && scenePhase == .active && isContentVisible,
+                    isMotionEnabled: !isTransitioning && !isSwipeInteracting && scenePhase == .active && isContentVisible,
                     detailMotionChannel: spatialMotion.detailChannel
                 )
 
@@ -6140,7 +6164,12 @@ private struct FluidPlayerOverlay: View {
                     .contentShape(Rectangle())
                     .gesture(playerSwipeGesture())
                     .simultaneousGesture(
-                        TapGesture().onEnded {
+                        SpatialTapGesture().onEnded { value in
+                            guard isPlaybackTap(
+                                at: value.location,
+                                in: proxy.size,
+                                topInset: topInset
+                            ) else { return }
                             handlePlaybackTap()
                         }
                     )
@@ -6148,17 +6177,36 @@ private struct FluidPlayerOverlay: View {
                     .accessibilityHidden(true)
 
                 Button(action: onClose) {
-                    Image(systemName: "chevron.down")
-                        .font(.headline.weight(.bold))
-                        .foregroundStyle(
-                            palette.primaryText
-                        )
-                        .frame(width: 44, height: 44)
-                        .liquidGlassSurface(cornerRadius: 22, isInteractive: true)
+                    ZStack {
+                        Image(systemName: "chevron.down")
+                            .font(.headline.weight(.bold))
+                            .foregroundStyle(palette.primaryText)
+                            .frame(width: 44, height: 44)
+                            .liquidGlassSurface(cornerRadius: 22, isInteractive: true)
+                    }
+                    .frame(width: 64, height: 64)
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("关闭播放器")
                 .position(x: 34, y: topInset + 28)
+                .zIndex(50)
+
+                Button {
+                    isShareComposerPresented = true
+                } label: {
+                    Image(systemName: "square.and.arrow.up")
+                        .font(.headline.weight(.bold))
+                        .foregroundStyle(palette.primaryText)
+                        .frame(width: 44, height: 44)
+                        .liquidGlassSurface(cornerRadius: 22, isInteractive: true)
+                }
+                .frame(width: 64, height: 64)
+                .contentShape(Rectangle())
+                .buttonStyle(.plain)
+                .accessibilityLabel("分享正在播放的歌曲")
+                .position(x: proxy.size.width - 34, y: topInset + 28)
+                .zIndex(50)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(.clear)
@@ -6225,6 +6273,7 @@ private struct FluidPlayerOverlay: View {
         .onDisappear {
             transitionTask?.cancel()
             playbackHandoffTask?.cancel()
+            isSwipeInteracting = false
             spatialMotion.stop()
         }
         .onChange(of: reduceMotion) { _, isReduced in
@@ -6240,6 +6289,10 @@ private struct FluidPlayerOverlay: View {
             } else {
                 spatialMotion.stop()
             }
+        }
+        .sheet(isPresented: $isShareComposerPresented) {
+            NowPlayingShareSheet(song: currentSong)
+                .interactiveDismissDisabled()
         }
     }
 
@@ -6298,6 +6351,10 @@ private struct FluidPlayerOverlay: View {
                         swipeAxis = .vertical
                     }
                 }
+                if swipeAxis != nil, isSwipeInteracting == false {
+                    isSwipeInteracting = true
+                    spatialMotion.pause()
+                }
                 if swipeAxis == .vertical {
                     dragOffset = 0
                     return
@@ -6317,6 +6374,7 @@ private struct FluidPlayerOverlay: View {
                 if resolvedAxis == .vertical {
                     dragOffset = 0
                     finishDismissDrag(value)
+                    resumeSwipeMotionIfNeeded()
                     return
                 }
                 finishDrag(value)
@@ -6340,28 +6398,47 @@ private struct FluidPlayerOverlay: View {
         UIImpactFeedbackGenerator(style: .light).impactOccurred(intensity: 0.65)
     }
 
+    private func isPlaybackTap(at location: CGPoint, in size: CGSize, topInset: CGFloat) -> Bool {
+        let controlsHeight = topInset + 68
+        return location.y > controlsHeight && location.x > 72 && location.x < size.width - 72
+    }
+
     private func finishDrag(_ value: DragGesture.Value) {
         let threshold: CGFloat = 64
         let translation = value.translation.width
         let predicted = value.predictedEndTranslation.width
 
+        var didBeginTransition = false
         if translation < -threshold || predicted < -threshold * 1.45 {
-            beginTransition(step: 1)
+            didBeginTransition = beginTransition(step: 1)
         } else if translation > threshold || predicted > threshold * 1.45 {
-            beginTransition(step: -1)
+            didBeginTransition = beginTransition(step: -1)
         }
 
         withAnimation(.smooth(duration: 0.20, extraBounce: 0.0)) {
             dragOffset = 0
         }
+        if didBeginTransition == false {
+            resumeSwipeMotionIfNeeded()
+        }
     }
 
-    private func beginTransition(step: Int) {
-        guard !isTransitioning, songs.isEmpty == false else { return }
+    private func resumeSwipeMotionIfNeeded() {
+        isSwipeInteracting = false
+        guard reduceMotion == false,
+              scenePhase == .active,
+              isContentVisible,
+              isTransitioning == false else { return }
+        spatialMotion.start()
+    }
+
+    @discardableResult
+    private func beginTransition(step: Int) -> Bool {
+        guard !isTransitioning, songs.isEmpty == false else { return false }
         let nextIndex = currentIndex + step
         guard songs.indices.contains(nextIndex) else {
             UINotificationFeedbackGenerator().notificationOccurred(.warning)
-            return
+            return false
         }
 
         let song = songs[nextIndex]
@@ -6394,12 +6471,14 @@ private struct FluidPlayerOverlay: View {
                 transitionProgress = 0
                 currentIndex = nextIndex
                 dragOffset = 0
+                isSwipeInteracting = false
             }
             preloadNearbyArtwork()
             if reduceMotion == false {
                 spatialMotion.start()
             }
         }
+        return true
     }
 
     private func syncCurrentIndex() {
@@ -6784,7 +6863,7 @@ private struct FluidPlayerBackdrop: View {
                             width: proxy.size.width + 84,
                             height: proxy.size.height * 0.45
                         )
-                        .opacity(0.90)
+                        .opacity(1)
                         .mask {
                             LinearGradient(
                                 stops: [
@@ -6809,10 +6888,10 @@ private struct FluidPlayerBackdrop: View {
                     LinearGradient(
                         stops: [
                             .init(color: .clear, location: 0.00),
-                            .init(color: .black.opacity(0.08), location: 0.22),
-                            .init(color: .black.opacity(0.20), location: 0.48),
-                            .init(color: .black.opacity(0.30), location: 0.72),
-                            .init(color: .black.opacity(0.36), location: 1.00)
+                            .init(color: .black.opacity(0.07), location: 0.22),
+                            .init(color: .black.opacity(0.16), location: 0.48),
+                            .init(color: .black.opacity(0.25), location: 0.72),
+                            .init(color: .black.opacity(0.31), location: 1.00)
                         ],
                         startPoint: .top,
                         endPoint: .bottom
@@ -6855,10 +6934,10 @@ private struct PlayerCardWaveLights: View {
                         .fill(
                             RadialGradient(
                                 colors: [
-                                    secondaryCoverColor.opacity(0.22),
-                                    song.magicColor.opacity(0.62),
-                                    palette.accent.opacity(0.34),
-                                    song.magicColor.opacity(0.08),
+                                    secondaryCoverColor.opacity(0.29),
+                                    song.magicColor.opacity(0.76),
+                                    palette.accent.opacity(0.44),
+                                    song.magicColor.opacity(0.12),
                                     .clear
                                 ],
                                 center: .center,
@@ -6866,7 +6945,7 @@ private struct PlayerCardWaveLights: View {
                                 endRadius: width * 0.72
                             )
                         )
-                        .frame(width: width * 1.55, height: height * 0.96)
+                        .frame(width: width * 1.66, height: height * 1.04)
                         .offset(
                             x: CGFloat(primaryWave) * width * 0.08,
                             y: height * (0.28 + CGFloat(secondaryWave) * 0.05)
@@ -6879,17 +6958,17 @@ private struct PlayerCardWaveLights: View {
                             LinearGradient(
                                 colors: [
                                     .clear,
-                                    song.magicColor.opacity(0.30),
-                                    secondaryCoverColor.opacity(0.46),
-                                    song.magicColor.opacity(0.54),
-                                    palette.accent.opacity(0.26),
+                                    song.magicColor.opacity(0.40),
+                                    secondaryCoverColor.opacity(0.58),
+                                    song.magicColor.opacity(0.66),
+                                    palette.accent.opacity(0.36),
                                     .clear
                                 ],
                                 startPoint: .leading,
                                 endPoint: .trailing
                             )
                         )
-                        .frame(width: width * 1.42, height: height * 0.36)
+                        .frame(width: width * 1.50, height: height * 0.40)
                         .rotationEffect(.degrees(primaryWave * 5.5))
                         .offset(
                             x: CGFloat(secondaryWave) * width * 0.10,
@@ -6903,17 +6982,17 @@ private struct PlayerCardWaveLights: View {
                             LinearGradient(
                                 colors: [
                                     .clear,
-                                    palette.accent.opacity(0.24),
-                                    song.magicColor.opacity(0.42),
-                                    secondaryCoverColor.opacity(0.38),
-                                    palette.accent.opacity(0.28),
+                                    palette.accent.opacity(0.32),
+                                    song.magicColor.opacity(0.54),
+                                    secondaryCoverColor.opacity(0.48),
+                                    palette.accent.opacity(0.36),
                                     .clear
                                 ],
                                 startPoint: .leading,
                                 endPoint: .trailing
                             )
                         )
-                        .frame(width: width * 1.50, height: height * 0.30)
+                        .frame(width: width * 1.58, height: height * 0.34)
                         .rotationEffect(.degrees(-secondaryWave * 4.5))
                         .offset(
                             x: CGFloat(primaryWave) * width * 0.12,
@@ -7518,6 +7597,1058 @@ private struct FluidPlayerPage: View {
     }
 }
 
+private struct NowPlayingShareSheet: View {
+    let song: DemoSong
+
+    @Environment(\.dismiss) private var dismiss
+    @StateObject private var location = NowPlayingShareLocation()
+    @State private var capturedPhoto: UIImage?
+    @State private var isCameraPresented = false
+    @State private var isActivityPresented = false
+    @State private var isCameraUnavailableAlertPresented = false
+    @State private var artworkOffset: CGSize = .zero
+    @State private var artworkScale: CGFloat = 1
+    @State private var downloadStatusMessage: String?
+    @State private var isLyricsVisible = false
+    @State private var lyricsOffset: CGSize = .zero
+    @State private var lyricsScale: CGFloat = 1
+    @State private var lyricsRotation: CGFloat = 0
+    @State private var songInfoOffset: CGSize = .zero
+    @State private var isDownloadCaptureActive = false
+
+    private var locationDescription: String {
+        guard location.isLocationSharingEnabled else { return "未附加地点" }
+        return location.placeName ?? "此刻"
+    }
+
+    private var shareMessage: String {
+        guard location.isLocationSharingEnabled else {
+            return "我正在听《\(song.title)》 - \(song.artist)。来自 FlipMusic"
+        }
+        return "我正在\(locationDescription)听《\(song.title)》 - \(song.artist)。来自 FlipMusic"
+    }
+
+    var body: some View {
+        let palette = PlayerPaletteCache.shared.palette(for: song)
+
+        ZStack {
+            ShareMomentBackground(photo: capturedPhoto, palette: palette)
+                .ignoresSafeArea()
+
+            VStack(spacing: 0) {
+                HStack {
+                    Button(action: dismiss.callAsFunction) {
+                        Image(systemName: "xmark")
+                            .font(.subheadline.weight(.bold))
+                            .frame(width: 40, height: 40)
+                            .background(.black.opacity(0.16), in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("关闭分享")
+
+                    Spacer()
+
+                    HStack(spacing: 12) {
+                        Text("FLIPMUSIC")
+                            .font(.caption.weight(.bold))
+                            .tracking(1.6)
+                            .opacity(0.72)
+
+                        Button {
+                            downloadShareImage()
+                        } label: {
+                            Image(systemName: "arrow.down.to.line")
+                                .font(.subheadline.weight(.bold))
+                                .frame(width: 40, height: 40)
+                                .background(.black.opacity(0.16), in: Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("下载分享图片")
+                    }
+                }
+                .foregroundStyle(palette.primaryText)
+                .padding(.horizontal, 22)
+                .padding(.top, 14)
+
+                Spacer(minLength: 18)
+
+                ShareRecordArtwork(song: song)
+                    .frame(maxWidth: 330)
+                    .aspectRatio(1, contentMode: .fit)
+                    .padding(.horizontal, 30)
+                    .offset(x: artworkOffset.width, y: artworkOffset.height)
+                    .scaleEffect(artworkScale)
+                    .overlay {
+                        ShareArtworkInteractionLayer(offset: $artworkOffset, scale: $artworkScale)
+                    }
+                    .accessibilityLabel("拖动封面和黑胶调整位置")
+
+                if isLyricsVisible {
+                    ShareLyricsPreview(song: song, palette: palette)
+                        .padding(.horizontal, 28)
+                        .padding(.top, 18)
+                        .frame(maxWidth: .infinity, minHeight: 116, alignment: .center)
+                        .offset(x: lyricsOffset.width, y: lyricsOffset.height)
+                        .scaleEffect(lyricsScale)
+                        .rotationEffect(.degrees(lyricsRotation))
+                        .overlay {
+                            ShareLyricsInteractionLayer(
+                                offset: $lyricsOffset,
+                                scale: $lyricsScale,
+                                rotation: $lyricsRotation
+                            )
+                            .padding(.horizontal, -22)
+                            .padding(.vertical, -16)
+                        }
+                }
+
+                ShareMovableContent(offset: $songInfoOffset) {
+                    VStack(alignment: .leading, spacing: 7) {
+                        Text(song.title)
+                            .font(.title2.weight(.bold))
+                            .lineLimit(2)
+                        Text(song.artist)
+                            .font(.headline.weight(.medium))
+                            .opacity(0.70)
+                            .lineLimit(1)
+                    }
+                    .foregroundStyle(palette.primaryText)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 28)
+                    .padding(.top, 26)
+                }
+
+                Spacer(minLength: 20)
+
+                HStack(alignment: .center) {
+                    if location.isLocationSharingEnabled {
+                        Label(location.statusText, systemImage: "location.fill")
+                            .font(.subheadline.weight(.medium))
+                            .opacity(0.76)
+                            .lineLimit(1)
+                    }
+
+                    Spacer(minLength: 0)
+
+                    Text("FLIPMUSIC")
+                        .font(.caption2.weight(.heavy))
+                        .tracking(1.2)
+                        .opacity(0.62)
+                }
+                .foregroundStyle(palette.primaryText)
+                .padding(.horizontal, 28)
+                .padding(.bottom, 12)
+                .offset(y: -64)
+
+                HStack(spacing: 12) {
+                    Button {
+                        location.toggleSharing()
+                    } label: {
+                        Image(systemName: location.isLocationSharingEnabled
+                            ? (location.isLocating ? "location.circle.fill" : "location.fill")
+                            : "location.slash.fill"
+                        )
+                            .frame(width: 48, height: 48)
+                    }
+                    .buttonStyle(ShareRoundControlStyle())
+                    .accessibilityLabel(location.isLocationSharingEnabled ? "关闭位置分享" : "开启位置分享")
+
+                    Button {
+                        isLyricsVisible.toggle()
+                    } label: {
+                        Image(systemName: "text.quote")
+                            .font(.subheadline.weight(.bold))
+                            .frame(width: 48, height: 48)
+                    }
+                    .buttonStyle(ShareRoundControlStyle(isPrimary: isLyricsVisible))
+                    .accessibilityLabel(isLyricsVisible ? "隐藏歌词" : "显示歌词")
+
+                    Button {
+                        guard UIImagePickerController.isSourceTypeAvailable(.camera) else {
+                            isCameraUnavailableAlertPresented = true
+                            return
+                        }
+                        isCameraPresented = true
+                    } label: {
+                        HStack(spacing: 8) {
+                            if let capturedPhoto {
+                                Image(uiImage: capturedPhoto)
+                                    .resizable()
+                                    .scaledToFill()
+                                    .frame(width: 26, height: 26)
+                                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                            } else {
+                                Image(systemName: "camera.fill")
+                            }
+                            Text(capturedPhoto == nil ? "拍照" : "已拍照")
+                                .font(.subheadline.weight(.semibold))
+                        }
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 48)
+                    }
+                    .buttonStyle(ShareWideControlStyle())
+
+                    Button {
+                        isActivityPresented = true
+                    } label: {
+                        Image(systemName: "square.and.arrow.up")
+                            .frame(width: 48, height: 48)
+                    }
+                    .buttonStyle(ShareRoundControlStyle(isPrimary: true))
+                    .accessibilityLabel("分享这一刻")
+                }
+                .foregroundStyle(palette.primaryText)
+                .padding(.horizontal, 22)
+                .padding(.bottom, 18)
+                .opacity(isDownloadCaptureActive ? 0 : 1)
+                .allowsHitTesting(isDownloadCaptureActive == false)
+            }
+        }
+        .task {
+            location.refresh()
+        }
+        .fullScreenCover(isPresented: $isCameraPresented) {
+            ShareCameraPicker(image: $capturedPhoto)
+                .ignoresSafeArea()
+        }
+        .sheet(isPresented: $isActivityPresented) {
+            ActivityShareSheet(items: shareItems)
+        }
+        .alert("当前设备无法使用相机", isPresented: $isCameraUnavailableAlertPresented) {
+            Button("好", role: .cancel) { }
+        }
+        .alert("分享图片", isPresented: Binding(
+            get: { downloadStatusMessage != nil },
+            set: { if !$0 { downloadStatusMessage = nil } }
+        )) {
+            Button("好", role: .cancel) {
+                downloadStatusMessage = nil
+            }
+        } message: {
+            Text(downloadStatusMessage ?? "")
+        }
+    }
+
+    private var shareItems: [Any] {
+        var items: [Any] = [shareMessage]
+        if let capturedPhoto {
+            items.append(capturedPhoto)
+        }
+        return items
+    }
+
+    private func downloadShareImage() {
+        Task { @MainActor in
+            isDownloadCaptureActive = true
+            try? await Task.sleep(nanoseconds: 80_000_000)
+            let image = ShareMomentInterfaceCapture.image()
+            isDownloadCaptureActive = false
+
+            guard let image else {
+                downloadStatusMessage = "暂时无法生成分享图片，请稍后再试。"
+                return
+            }
+
+            PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
+                guard status == .authorized || status == .limited else {
+                    Task { @MainActor in
+                        downloadStatusMessage = "请在系统设置中允许 FlipMusic 添加照片后再下载。"
+                    }
+                    return
+                }
+
+                PHPhotoLibrary.shared().performChanges {
+                    PHAssetChangeRequest.creationRequestForAsset(from: image)
+                } completionHandler: { success, _ in
+                    Task { @MainActor in
+                        downloadStatusMessage = success ? "已保存到照片。" : "保存失败，请稍后再试。"
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct ShareMomentBackground: View {
+    let photo: UIImage?
+    let palette: PlayerImmersivePalette
+
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack {
+                if let photo {
+                    Image(uiImage: photo)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: proxy.size.width, height: proxy.size.height)
+                        .overlay(.black.opacity(0.24))
+                } else {
+                    LinearGradient(
+                        colors: [
+                            palette.backgroundTop,
+                            palette.backgroundMiddle,
+                            palette.backgroundBottom
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                    .overlay(.white.opacity(0.09))
+                }
+            }
+            .frame(width: proxy.size.width, height: proxy.size.height)
+        }
+        .clipped()
+    }
+}
+
+private func lyricFont(size: CGFloat, text: String) -> Font {
+    let letters = text.unicodeScalars.filter { CharacterSet.letters.contains($0) }
+    let isEnglishOnly = letters.isEmpty == false && letters.allSatisfy(\.isASCII)
+    let font = Font.system(size: size, weight: .bold, design: .default)
+    return isEnglishOnly ? font.width(.condensed) : font
+}
+
+private struct ShareLyricsPreview: View {
+    let song: DemoSong
+    let palette: PlayerImmersivePalette
+
+    @State private var lines: [SyncedLyricLine] = []
+
+    private var query: LRCLIBLyricsQuery {
+        LRCLIBLyricsQuery(
+            trackName: song.title,
+            artistName: song.artist,
+            albumName: song.mediaItem?.albumTitle,
+            duration: song.mediaItem?.playbackDuration
+        )
+    }
+
+    private var currentLyric: String? {
+        guard lines.isEmpty == false else { return nil }
+        let time = MPMusicPlayerController.systemMusicPlayer.currentPlaybackTime
+        let safeTime = time.isFinite ? max(0, time) : 0
+        return lines.last(where: { $0.timestamp <= safeTime })?.text ?? lines.first?.text
+    }
+
+    var body: some View {
+        Group {
+            if let currentLyric, currentLyric.isEmpty == false {
+                Text(currentLyric)
+                    .font(lyricFont(size: 24, text: currentLyric))
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                Text("暂无歌词")
+                    .font(.subheadline.weight(.semibold))
+                    .opacity(0.62)
+            }
+        }
+        .foregroundStyle(palette.primaryText)
+        .task(id: query) {
+            if let embedded = song.lyricsText {
+                let parsed = LRCLIBLRCParser.parse(embedded)
+                if parsed.isEmpty == false {
+                    lines = parsed
+                    return
+                }
+            }
+
+            lines = await LRCLIBLyricsService.shared.lyrics(for: query) ?? []
+        }
+    }
+}
+
+private struct ShareMovableContent<Content: View>: View {
+    @Binding var offset: CGSize
+    @ViewBuilder let content: Content
+    @State private var dragStartOffset: CGSize = .zero
+    @State private var isDragging = false
+
+    var body: some View {
+        content
+            .contentShape(Rectangle())
+            .offset(x: offset.width, y: offset.height)
+            .highPriorityGesture(
+                DragGesture(minimumDistance: 2)
+                    .onChanged { value in
+                        if isDragging == false {
+                            dragStartOffset = offset
+                            isDragging = true
+                        }
+                        offset = CGSize(
+                            width: dragStartOffset.width + value.translation.width,
+                            height: dragStartOffset.height + value.translation.height
+                        )
+                    }
+                    .onEnded { _ in
+                        isDragging = false
+                    }
+            )
+    }
+}
+
+private struct ShareSticker: View {
+    let text: String
+    var systemImage: String? = nil
+    var background = Color.white.opacity(0.88)
+    var foreground = Color.black.opacity(0.84)
+
+    var body: some View {
+        HStack(spacing: 6) {
+            if let systemImage {
+                Image(systemName: systemImage)
+            }
+            Text(text)
+                .lineLimit(1)
+        }
+        .font(.caption.weight(.heavy))
+        .tracking(0.7)
+        .foregroundStyle(foreground)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(background, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+        .rotationEffect(.degrees(-2))
+    }
+}
+
+private struct EditableShareSticker: View {
+    let text: String
+    @Binding var offset: CGSize
+    let background: Color
+    let foreground: Color
+    let onEdit: () -> Void
+    @State private var dragStartOffset: CGSize = .zero
+    @State private var isDragging = false
+
+    var body: some View {
+        ShareSticker(text: text, background: background, foreground: foreground)
+            .offset(x: offset.width, y: offset.height)
+            .highPriorityGesture(
+                DragGesture(minimumDistance: 3)
+                    .onChanged { value in
+                        if isDragging == false {
+                            dragStartOffset = offset
+                            isDragging = true
+                        }
+                        offset = CGSize(
+                            width: dragStartOffset.width + value.translation.width,
+                            height: dragStartOffset.height + value.translation.height
+                        )
+                    }
+                    .onEnded { _ in
+                        isDragging = false
+                    }
+            )
+            .onTapGesture {
+                guard isDragging == false else { return }
+                onEdit()
+            }
+            .accessibilityLabel("编辑标签 \(text)")
+    }
+}
+
+private struct ShareStickerTone {
+    let background: Color
+    let foreground: Color
+    let alternateBackground: Color
+    let alternateForeground: Color
+
+    init(song: DemoSong) {
+        let source = UIColor(songPalette: song.colors)
+        var hue: CGFloat = 0
+        var saturation: CGFloat = 0
+        var brightness: CGFloat = 0
+        var alpha: CGFloat = 0
+        source.getHue(&hue, saturation: &saturation, brightness: &brightness, alpha: &alpha)
+
+        let primary = UIColor(
+            hue: hue,
+            saturation: min(max(saturation * 0.82 + 0.12, 0.38), 0.92),
+            brightness: min(max(brightness * 1.10, 0.42), 0.94),
+            alpha: 0.96
+        )
+        let alternate = UIColor(
+            hue: (hue + 0.10).truncatingRemainder(dividingBy: 1),
+            saturation: min(max(saturation * 0.66 + 0.18, 0.30), 0.76),
+            brightness: min(max(brightness * 0.80, 0.28), 0.74),
+            alpha: 0.96
+        )
+
+        background = Color(uiColor: primary)
+        foreground = Self.luminance(of: primary) > 0.46 ? .black.opacity(0.86) : .white.opacity(0.94)
+        alternateBackground = Color(uiColor: alternate)
+        alternateForeground = Self.luminance(of: alternate) > 0.42 ? .black.opacity(0.86) : .white.opacity(0.94)
+    }
+
+    private static func luminance(of color: UIColor) -> CGFloat {
+        var red: CGFloat = 0
+        var green: CGFloat = 0
+        var blue: CGFloat = 0
+        var alpha: CGFloat = 0
+        guard color.getRed(&red, green: &green, blue: &blue, alpha: &alpha) else { return 0 }
+        func linear(_ value: CGFloat) -> CGFloat {
+            value <= 0.04045 ? value / 12.92 : pow((value + 0.055) / 1.055, 2.4)
+        }
+        return linear(red) * 0.2126 + linear(green) * 0.7152 + linear(blue) * 0.0722
+    }
+}
+
+private struct ShareRecordArtwork: View {
+    let song: DemoSong
+
+    var body: some View {
+        GeometryReader { proxy in
+            let side = min(proxy.size.width, proxy.size.height)
+            ZStack {
+                ShareVinylRecord(song: song)
+                    .frame(width: side * 0.62, height: side * 0.62)
+                    .offset(x: side * 0.20, y: side * 0.03)
+
+                SongArtworkLayer(song: song)
+                    .frame(width: side * 0.70, height: side * 0.70)
+                    .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                    .rotationEffect(.degrees(-12))
+                    .shadow(color: .black.opacity(0.24), radius: 16, y: 10)
+                    .offset(x: -side * 0.08)
+            }
+            .frame(width: proxy.size.width, height: proxy.size.height)
+        }
+    }
+}
+
+private struct ShareVinylRecord: View {
+    let song: DemoSong
+
+    var body: some View {
+        let palette = PlayerPaletteCache.shared.palette(for: song)
+
+        ZStack {
+            Circle()
+                .fill(.black.opacity(0.88))
+            Circle()
+                .stroke(.white.opacity(0.13), lineWidth: 1)
+                .padding(10)
+            Circle()
+                .stroke(.white.opacity(0.09), lineWidth: 1)
+                .padding(26)
+            Circle()
+                .stroke(.white.opacity(0.08), lineWidth: 1)
+                .padding(44)
+            Circle()
+                .fill(palette.accent.opacity(0.88))
+                .padding(70)
+            Circle()
+                .fill(.black.opacity(0.78))
+                .frame(width: 11, height: 11)
+        }
+        .shadow(color: .black.opacity(0.30), radius: 12, y: 8)
+    }
+}
+
+private struct ShareRoundControlStyle: ButtonStyle {
+    var isPrimary = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .background(isPrimary ? .white.opacity(0.26) : .black.opacity(0.15), in: Circle())
+            .opacity(configuration.isPressed ? 0.68 : 1)
+            .scaleEffect(configuration.isPressed ? 0.94 : 1)
+    }
+}
+
+private struct ShareWideControlStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .background(.black.opacity(0.15), in: Capsule())
+            .opacity(configuration.isPressed ? 0.68 : 1)
+            .scaleEffect(configuration.isPressed ? 0.98 : 1)
+    }
+}
+
+private struct ShareArtworkInteractionLayer: UIViewRepresentable {
+    @Binding var offset: CGSize
+    @Binding var scale: CGFloat
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
+    }
+
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView()
+        view.backgroundColor = .clear
+
+        let pan = UIPanGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handlePan(_:)))
+        pan.minimumNumberOfTouches = 1
+        pan.maximumNumberOfTouches = 1
+        pan.delegate = context.coordinator
+
+        let pinch = UIPinchGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handlePinch(_:)))
+        pinch.delegate = context.coordinator
+
+        view.addGestureRecognizer(pan)
+        view.addGestureRecognizer(pinch)
+        return view
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        context.coordinator.parent = self
+    }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        var parent: ShareArtworkInteractionLayer
+        private var panStartOffset: CGSize = .zero
+        private var pinchStartScale: CGFloat = 1
+
+        init(parent: ShareArtworkInteractionLayer) {
+            self.parent = parent
+        }
+
+        @objc func handlePan(_ recognizer: UIPanGestureRecognizer) {
+            switch recognizer.state {
+            case .began:
+                panStartOffset = parent.offset
+            case .changed, .ended:
+                let translation = recognizer.translation(in: recognizer.view)
+                parent.offset = CGSize(
+                    width: min(max(panStartOffset.width + translation.x, -110), 110),
+                    height: min(max(panStartOffset.height + translation.y, -150), 150)
+                )
+            default:
+                break
+            }
+        }
+
+        @objc func handlePinch(_ recognizer: UIPinchGestureRecognizer) {
+            switch recognizer.state {
+            case .began:
+                pinchStartScale = parent.scale
+            case .changed, .ended:
+                parent.scale = min(max(pinchStartScale * recognizer.scale, 0.62), 1.55)
+            default:
+                break
+            }
+        }
+
+        func gestureRecognizer(
+            _ gestureRecognizer: UIGestureRecognizer,
+            shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+        ) -> Bool {
+            false
+        }
+    }
+}
+
+private struct ShareLyricsInteractionLayer: UIViewRepresentable {
+    @Binding var offset: CGSize
+    @Binding var scale: CGFloat
+    @Binding var rotation: CGFloat
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
+    }
+
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView()
+        view.backgroundColor = .clear
+
+        let pan = UIPanGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handlePan(_:)))
+        pan.maximumNumberOfTouches = 1
+        pan.delegate = context.coordinator
+
+        let pinch = UIPinchGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handlePinch(_:)))
+        pinch.delegate = context.coordinator
+
+        let rotation = UIRotationGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleRotation(_:)))
+        rotation.delegate = context.coordinator
+
+        view.addGestureRecognizer(pan)
+        view.addGestureRecognizer(pinch)
+        view.addGestureRecognizer(rotation)
+        return view
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        context.coordinator.parent = self
+    }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        var parent: ShareLyricsInteractionLayer
+        private var panStartOffset: CGSize = .zero
+        private var pinchStartScale: CGFloat = 1
+        private var rotationStartDegrees: CGFloat = 0
+
+        init(parent: ShareLyricsInteractionLayer) {
+            self.parent = parent
+        }
+
+        @objc func handlePan(_ recognizer: UIPanGestureRecognizer) {
+            switch recognizer.state {
+            case .began:
+                panStartOffset = parent.offset
+            case .changed, .ended:
+                let translation = recognizer.translation(in: recognizer.view)
+                parent.offset = CGSize(
+                    width: panStartOffset.width + translation.x,
+                    height: panStartOffset.height + translation.y
+                )
+            default:
+                break
+            }
+        }
+
+        @objc func handlePinch(_ recognizer: UIPinchGestureRecognizer) {
+            switch recognizer.state {
+            case .began:
+                pinchStartScale = parent.scale
+            case .changed, .ended:
+                parent.scale = min(max(pinchStartScale * recognizer.scale, 0.55), 2.2)
+            default:
+                break
+            }
+        }
+
+        @objc func handleRotation(_ recognizer: UIRotationGestureRecognizer) {
+            switch recognizer.state {
+            case .began:
+                rotationStartDegrees = parent.rotation
+            case .changed, .ended:
+                parent.rotation = rotationStartDegrees + recognizer.rotation * 180 / .pi
+            default:
+                break
+            }
+        }
+
+        func gestureRecognizer(
+            _ gestureRecognizer: UIGestureRecognizer,
+            shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+        ) -> Bool {
+            true
+        }
+    }
+}
+
+@MainActor
+private enum ShareMomentInterfaceCapture {
+    static func image() -> UIImage? {
+        let window = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap(\.windows)
+            .first { $0.isKeyWindow }
+        guard let window else { return nil }
+
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = window.screen.scale
+        format.opaque = true
+        let fullImage = UIGraphicsImageRenderer(bounds: window.bounds, format: format).image { _ in
+            window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+        }
+
+        // Keep the exported moment focused on the artwork and song details.
+        let verticalInsetTop = fullImage.size.height * 0.13
+        let verticalInsetBottom = fullImage.size.height * 0.06
+        let contentRect = CGRect(
+            x: 0,
+            y: verticalInsetTop,
+            width: fullImage.size.width,
+            height: fullImage.size.height - verticalInsetTop - verticalInsetBottom
+        ).applying(CGAffineTransform(scaleX: fullImage.scale, y: fullImage.scale))
+        guard let croppedImage = fullImage.cgImage?.cropping(to: contentRect.integral) else {
+            return fullImage
+        }
+        return UIImage(cgImage: croppedImage, scale: fullImage.scale, orientation: fullImage.imageOrientation)
+    }
+}
+
+@MainActor
+private enum ShareMomentRenderer {
+    static func makeImage(
+        song: DemoSong,
+        location: String,
+        photo: UIImage?,
+        artworkOffset: CGSize,
+        artworkScale: CGFloat,
+        primaryTagText: String,
+        secondaryTagText: String,
+        primaryTagOffset: CGSize,
+        secondaryTagOffset: CGSize
+    ) -> UIImage? {
+        let size = CGSize(width: 1080, height: 1350)
+        let artworkBaseSize: CGFloat = 620
+        let stageHeight: CGFloat = 760
+        let coordinateScale = stageHeight / 318
+        let rawArtworkOffset = CGSize(
+            width: artworkOffset.width * coordinateScale,
+            height: artworkOffset.height * coordinateScale
+        )
+        let scaledArtworkSize = artworkBaseSize * artworkScale
+        let maxArtworkX = max(0, (size.width - scaledArtworkSize) / 2)
+        let maxArtworkY = max(0, (stageHeight - scaledArtworkSize) / 2)
+        let fittedArtworkOffset = CGSize(
+            width: min(max(rawArtworkOffset.width, -maxArtworkX), maxArtworkX),
+            height: min(max(rawArtworkOffset.height, -maxArtworkY), maxArtworkY)
+        )
+        let tagScale = size.width / 390
+        let content = ShareMomentExportCard(
+            song: song,
+            location: location,
+            photo: photo,
+            artworkOffset: fittedArtworkOffset,
+            artworkScale: artworkScale,
+            artworkBaseSize: artworkBaseSize,
+            primaryTagText: primaryTagText,
+            secondaryTagText: secondaryTagText,
+            primaryTagOffset: CGSize(
+                width: primaryTagOffset.width * tagScale,
+                height: primaryTagOffset.height * tagScale
+            ),
+            secondaryTagOffset: CGSize(
+                width: secondaryTagOffset.width * tagScale,
+                height: secondaryTagOffset.height * tagScale
+            )
+        )
+        .frame(width: size.width, height: size.height)
+
+        let renderer = ImageRenderer(content: content)
+        renderer.proposedSize = ProposedViewSize(width: size.width, height: size.height)
+        renderer.scale = 1
+        return renderer.uiImage
+    }
+}
+
+private struct ShareMomentExportCard: View {
+    let song: DemoSong
+    let location: String
+    let photo: UIImage?
+    let artworkOffset: CGSize
+    let artworkScale: CGFloat
+    let artworkBaseSize: CGFloat
+    let primaryTagText: String
+    let secondaryTagText: String
+    let primaryTagOffset: CGSize
+    let secondaryTagOffset: CGSize
+
+    var body: some View {
+        let palette = PlayerPaletteCache.shared.palette(for: song)
+        let stickerTone = ShareStickerTone(song: song)
+
+        ZStack {
+            ShareMomentBackground(photo: photo, palette: palette)
+
+            LinearGradient(
+                colors: [.clear, palette.backgroundBottom.opacity(0.20), palette.backgroundBottom.opacity(0.78)],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+
+            VStack(spacing: 0) {
+                ZStack(alignment: .topLeading) {
+                    ShareRecordArtwork(song: song)
+                        .frame(width: artworkBaseSize, height: artworkBaseSize)
+                        .scaleEffect(artworkScale)
+                        .offset(x: artworkOffset.width, y: artworkOffset.height)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                    ShareSticker(
+                        text: primaryTagText,
+                        background: stickerTone.background,
+                        foreground: stickerTone.foreground
+                    )
+                        .offset(x: primaryTagOffset.width, y: primaryTagOffset.height)
+                        .padding(.leading, 76)
+                        .padding(.top, 76)
+
+                    ShareSticker(
+                        text: secondaryTagText,
+                        background: stickerTone.alternateBackground,
+                        foreground: stickerTone.alternateForeground
+                    )
+                    .offset(x: secondaryTagOffset.width, y: secondaryTagOffset.height)
+                    .padding(.leading, 610)
+                    .padding(.top, 570)
+                }
+                .frame(height: 760)
+
+                VStack(alignment: .leading, spacing: 22) {
+                    HStack(alignment: .top, spacing: 24) {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text(song.title)
+                                .font(.system(size: 56, weight: .bold, design: .rounded))
+                                .lineLimit(2)
+                            Text(song.artist)
+                                .font(.system(size: 34, weight: .medium))
+                                .opacity(0.72)
+                        }
+                        Spacer(minLength: 0)
+                        Text("FLIP\nMUSIC")
+                            .font(.system(size: 18, weight: .heavy))
+                            .multilineTextAlignment(.trailing)
+                            .tracking(3)
+                            .opacity(0.62)
+                    }
+
+                    Label(location, systemImage: "location.fill")
+                        .font(.system(size: 27, weight: .medium))
+                        .opacity(0.78)
+                }
+                .foregroundStyle(palette.primaryText)
+                .padding(.horizontal, 76)
+                .padding(.top, 54)
+                .padding(.bottom, 58)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            }
+        }
+        .clipped()
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+@MainActor
+private final class NowPlayingShareLocation: NSObject, ObservableObject, CLLocationManagerDelegate {
+    @Published private(set) var placeName: String?
+    @Published private(set) var statusText = "正在获取当前位置"
+    @Published private(set) var isLocating = false
+    @Published private(set) var isLocationSharingEnabled = true
+
+    private let manager = CLLocationManager()
+    private let geocoder = CLGeocoder()
+
+    override init() {
+        super.init()
+        manager.delegate = self
+        manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
+    }
+
+    func refresh() {
+        guard isLocationSharingEnabled else {
+            statusText = "位置分享已关闭"
+            return
+        }
+        guard CLLocationManager.locationServicesEnabled() else {
+            statusText = "定位服务未开启，分享时不会附上地点"
+            return
+        }
+
+        switch manager.authorizationStatus {
+        case .notDetermined:
+            isLocating = true
+            statusText = "正在请求位置权限"
+            manager.requestWhenInUseAuthorization()
+        case .authorizedAlways, .authorizedWhenInUse:
+            isLocating = true
+            statusText = "正在获取当前位置"
+            manager.requestLocation()
+        case .denied, .restricted:
+            isLocating = false
+            statusText = "未允许位置权限，分享时不会附上地点"
+        @unknown default:
+            isLocating = false
+            statusText = "暂时无法获取当前位置"
+        }
+    }
+
+    func toggleSharing() {
+        isLocationSharingEnabled.toggle()
+        if isLocationSharingEnabled {
+            refresh()
+        } else {
+            manager.stopUpdatingLocation()
+            geocoder.cancelGeocode()
+            placeName = nil
+            isLocating = false
+            statusText = "位置分享已关闭"
+        }
+    }
+
+    func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+        guard manager.authorizationStatus == .authorizedAlways || manager.authorizationStatus == .authorizedWhenInUse else {
+            if manager.authorizationStatus == .denied || manager.authorizationStatus == .restricted {
+                isLocating = false
+                statusText = "未允许位置权限，分享时不会附上地点"
+            }
+            return
+        }
+        refresh()
+    }
+
+    func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        guard isLocationSharingEnabled, let coordinate = locations.last else { return }
+        Task {
+            do {
+                let placemarks = try await geocoder.reverseGeocodeLocation(coordinate)
+                let placemark = placemarks.first
+                let parts = [placemark?.locality, placemark?.administrativeArea]
+                    .compactMap { $0 }
+                let uniqueParts = Array(NSOrderedSet(array: parts)) as? [String] ?? parts
+                placeName = uniqueParts.isEmpty ? "此刻" : uniqueParts.joined(separator: " ")
+                statusText = placeName ?? "此刻"
+            } catch {
+                placeName = "此刻"
+                statusText = "未能识别具体地点，仍可继续分享"
+            }
+            isLocating = false
+        }
+    }
+
+    func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+        guard isLocationSharingEnabled else { return }
+        isLocating = false
+        statusText = "未能获取当前位置，仍可继续分享"
+    }
+}
+
+private struct ShareCameraPicker: UIViewControllerRepresentable {
+    @Binding var image: UIImage?
+    @Environment(\.dismiss) private var dismiss
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
+    }
+
+    func makeUIViewController(context: Context) -> UIImagePickerController {
+        let picker = UIImagePickerController()
+        picker.sourceType = .camera
+        picker.cameraCaptureMode = .photo
+        picker.delegate = context.coordinator
+        picker.allowsEditing = false
+        return picker
+    }
+
+    func updateUIViewController(_ uiViewController: UIImagePickerController, context: Context) { }
+
+    final class Coordinator: NSObject, UINavigationControllerDelegate, UIImagePickerControllerDelegate {
+        private let parent: ShareCameraPicker
+
+        init(parent: ShareCameraPicker) {
+            self.parent = parent
+        }
+
+        func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
+            parent.dismiss()
+        }
+
+        func imagePickerController(
+            _ picker: UIImagePickerController,
+            didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]
+        ) {
+            parent.image = info[.originalImage] as? UIImage
+            parent.dismiss()
+        }
+    }
+}
+
+private struct ActivityShareSheet: UIViewControllerRepresentable {
+    let items: [Any]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        let controller = UIActivityViewController(activityItems: items, applicationActivities: nil)
+        controller.popoverPresentationController?.sourceView = UIView()
+        return controller
+    }
+
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) { }
+}
+
 private struct MarqueeTextWidthPreferenceKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
 
@@ -7549,12 +8680,28 @@ private struct OneWayMarqueeTitle: View {
                         titleLabel
                         titleLabel
                     }
+                    .frame(width: (textWidth * 2) + gap, alignment: .leading)
                     .offset(x: offset)
                 } else {
                     titleLabel
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+            .frame(width: proxy.size.width, height: proxy.size.height, alignment: .leading)
+            .mask {
+                if shouldScroll {
+                    LinearGradient(
+                        stops: [
+                            .init(color: .white, location: 0),
+                            .init(color: .white, location: 0.82),
+                            .init(color: .clear, location: 1)
+                        ],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
+                } else {
+                    Color.white
+                }
+            }
             .clipped()
             .onAppear {
                 containerWidth = proxy.size.width
@@ -7565,6 +8712,7 @@ private struct OneWayMarqueeTitle: View {
                 restartAnimation()
             }
         }
+        .frame(maxWidth: .infinity)
         .frame(height: 28)
         .background {
             titleLabel
@@ -7598,12 +8746,17 @@ private struct OneWayMarqueeTitle: View {
     }
 
     private func restartAnimation() {
-        offset = 0
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            offset = 0
+        }
         guard shouldScroll else { return }
 
         let travelDistance = textWidth + gap
         let duration = max(6, travelDistance / pointsPerSecond)
         DispatchQueue.main.async {
+            guard self.shouldScroll else { return }
             withAnimation(.linear(duration: duration).repeatForever(autoreverses: false)) {
                 offset = -travelDistance
             }
@@ -7633,7 +8786,7 @@ private struct SyncedLyricsPairView: View {
                     let pair = visiblePair(at: playbackTimeForSong())
 
                     Text(pair.current)
-                        .font(.system(size: 36, weight: .bold))
+                        .font(lyricFont(size: 36, text: pair.current))
                         .foregroundStyle(palette.primaryText)
                         .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -7732,7 +8885,6 @@ private struct RotatingPlayerArtwork: View {
                     Circle()
                         .stroke(.white.opacity(0.24), lineWidth: 1)
                 }
-                .shadow(color: .black.opacity(0.30), radius: 8, y: 4)
                 .rotationEffect(.degrees(rotation))
         }
         .accessibilityLabel("专辑封面")
@@ -10856,6 +12008,7 @@ private struct HomeInteractiveSongSquare: View {
     let gravity: HomeCoverGravity
     let isFlipping: Bool
     let isAppearing: Bool
+    let isMotionPaused: Bool
     let flipGeneration: UUID
     let variation: HomeFlipVariation
     let onTap: () -> Void
@@ -10869,6 +12022,7 @@ private struct HomeInteractiveSongSquare: View {
                 isPlaying: isPlaying,
                 isFlipping: isFlipping,
                 isAppearing: isAppearing,
+                isMotionPaused: isMotionPaused,
                 flipGeneration: flipGeneration,
                 variation: variation
             )
@@ -10946,6 +12100,7 @@ private struct SongArtworkLayer: View {
 private struct SongSquare: View {
     let song: DemoSong
     let isPlaying: Bool
+    var isMotionPaused = false
 
     var body: some View {
         GeometryReader { proxy in
@@ -11009,7 +12164,7 @@ private struct SongSquare: View {
             }
             .overlay {
                 if song.isPlaceholder {
-                    PlaceholderCardLoadingSweep(seed: song.id)
+                    PlaceholderCardLoadingSweep(seed: song.id, isPaused: isMotionPaused)
                         .clipShape(RoundedRectangle(cornerRadius: 8))
                 }
             }
@@ -11077,9 +12232,10 @@ private struct SongSquare: View {
 
 private struct PlaceholderCardLoadingSweep: View {
     let seed: Int
+    let isPaused: Bool
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 12.0)) { timeline in
+        TimelineView(.animation(minimumInterval: 1.0 / 12.0, paused: isPaused)) { timeline in
             let phaseSeed = Double(abs(seed % 23)) * 0.037
             let phase = positiveModulo(timeline.date.timeIntervalSinceReferenceDate * 0.30 + phaseSeed, 1)
 
@@ -11156,6 +12312,7 @@ private struct HomeFlipSongSquare: View {
     let isPlaying: Bool
     let isFlipping: Bool
     let isAppearing: Bool
+    let isMotionPaused: Bool
     let flipGeneration: UUID
     let variation: HomeFlipVariation
     @State private var progress: CGFloat = 0
@@ -11187,7 +12344,7 @@ private struct HomeFlipSongSquare: View {
     @ViewBuilder
     private var cardBody: some View {
         if isAppearing {
-            SongSquare(song: backSong, isPlaying: isPlaying)
+            SongSquare(song: backSong, isPlaying: isPlaying, isMotionPaused: isMotionPaused)
                 .opacity(Double(progress))
                 .scaleEffect(0.975 + progress * 0.025)
                 .rotation3DEffect(
@@ -11199,9 +12356,9 @@ private struct HomeFlipSongSquare: View {
         } else {
             ZStack {
                 if progress < 0.5 {
-                    SongSquare(song: frontSong, isPlaying: isPlaying)
+                    SongSquare(song: frontSong, isPlaying: isPlaying, isMotionPaused: isMotionPaused)
                 } else {
-                    SongSquare(song: backSong, isPlaying: isPlaying)
+                    SongSquare(song: backSong, isPlaying: isPlaying, isMotionPaused: isMotionPaused)
                         .rotation3DEffect(
                             .degrees(180),
                             axis: (x: 1, y: 0, z: 0),

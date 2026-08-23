@@ -26,6 +26,12 @@
 	<false/>
 	<key>NSAppleMusicUsageDescription</key>
 	<string>用于读取你的 Apple Music 资料库、歌单、专辑和播放信息，在 App 内展示、播放并按你的选择创建歌单。</string>
+	<key>NSCameraUsageDescription</key>
+	<string>用于拍摄照片，并与你正在听的歌曲和当前位置一起分享。</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>用于在你分享正在听的歌曲时附上当前地点。</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>用于将你制作的歌曲分享图片保存到照片。</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
