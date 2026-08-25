@@ -153,6 +153,8 @@ struct ContentView: View {
                                         dislikeHomeSong(slot.song)
                                     }
                                 )
+                                // Slot IDs stay stable for flip animations; reset their visual state only when the playlist changes.
+                                .id("home-playlist-\(musicConnector.selectedApplePlaylistID)-slot-\(slot.id)")
                                 .onAppear {
                                     loadMoreHomeSongsIfNeeded(slot)
                                 }
@@ -202,12 +204,22 @@ struct ContentView: View {
                         } else {
                             GreetingBadge(mood: currentTimeMood, isPaused: isPlayerCardVisible)
                         }
-
                     }
                     Spacer()
-                    TopSettingsButton {
-                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                        activeTab = .settings
+                    HStack(spacing: 6) {
+                        if musicConnector.applePlaylistOptions.count > 1 {
+                            HomePlaylistPicker(
+                                selection: musicConnector.selectedApplePlaylistID,
+                                options: musicConnector.applePlaylistOptions,
+                                isLoading: musicConnector.isInitialLibraryLoading,
+                                onSelect: musicConnector.selectApplePlaylist
+                            )
+                        }
+
+                        TopSettingsButton {
+                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                            activeTab = .settings
+                        }
                     }
                     .opacity(chromeOpacity)
                     .allowsHitTesting(!isLandscape)
@@ -620,11 +632,12 @@ struct ContentView: View {
     }
 
     private func homeSourceSignature(for source: [DemoSong]) -> String {
-        source.prefix(120).map { song in
+        let songsSignature = source.prefix(120).map { song in
             let hasArtwork = song.artworkImage == nil ? "0" : "1"
             return "\(song.id):\(song.title):\(song.artist):\(song.source):\(hasArtwork)"
         }
         .joined(separator: "|")
+        return "\(musicConnector.selectedApplePlaylistID)#\(songsSignature)"
     }
 
     private func shouldRebuildHomeSongsForRealDiscovery() -> Bool {
@@ -781,6 +794,12 @@ struct ContentView: View {
             return
         }
 
+        guard musicConnector.isFilteringToSelectedApplePlaylist == false else {
+            isHomeLoadingMore = false
+            isHomeAppendingMore = false
+            return
+        }
+
         let page = homeLoadMorePage
         homeLoadMorePage += 1
 
@@ -808,6 +827,8 @@ struct ContentView: View {
             _ = appendHomeSongsWithFlip(sourceAdditions)
             return
         }
+
+        guard musicConnector.isFilteringToSelectedApplePlaylist == false else { return }
 
         guard visibleHomeSongs.filter({ $0.isHomeSurfacePlayable && $0.isPlaceholder == false }).count < targetCount else { return }
         homeAutoFillTask?.cancel()
@@ -1700,6 +1721,46 @@ private struct HeaderNowPlayingBadge: View {
                 .minimumScaleFactor(0.72)
         }
         .frame(maxWidth: 290, alignment: .leading)
+    }
+}
+
+private struct HomePlaylistPicker: View {
+    let selection: String
+    let options: [MusicPlaylistOption]
+    let isLoading: Bool
+    let onSelect: (String) -> Void
+
+    private var selectedOption: MusicPlaylistOption? {
+        options.first(where: { $0.id == selection })
+    }
+
+    var body: some View {
+        Menu {
+            ForEach(options) { option in
+                Button {
+                    onSelect(option.id)
+                } label: {
+                    Label(
+                        option.displayTitle,
+                        systemImage: option.id == selection ? "checkmark" : "music.note.list"
+                    )
+                }
+            }
+        } label: {
+            ZStack {
+                Image(systemName: "music.note.list")
+                if isLoading {
+                    ProgressView()
+                        .controlSize(.mini)
+                }
+            }
+            .foregroundStyle(.white.opacity(0.90))
+            .font(.system(size: 18, weight: .semibold))
+            .frame(width: 40, height: 40)
+        }
+        .buttonStyle(.plain)
+        .disabled(isLoading)
+        .accessibilityLabel(selectedOption?.displayTitle ?? "选择首页播放列表")
     }
 }
 
@@ -2798,6 +2859,12 @@ private final class MusicConnectionManager: ObservableObject {
 
     private func rebuildSongCaches() {
         let libraryItems = homeLibraryItems
+        if isFilteringToSelectedApplePlaylist {
+            homeSurfaceSongsCache = uniqueDiscoverySongs(from: librarySongs)
+            discoverySongsCache = homeSurfaceSongsCache
+            songCacheRevision &+= 1
+            return
+        }
         let recommendationSongs = aiRecommendationsEnabled ? recommendedSongs : []
         let rotatedLibrarySongs = rotatedHomeSongs(libraryItems, salt: homeFeedSessionSalt * 0.73 + 19)
         let rotatedAlbumCards = rotatedHomeSongs(libraryAlbumCards, salt: homeFeedSessionSalt * 0.91 + 37)
@@ -3099,6 +3166,10 @@ private final class MusicConnectionManager: ObservableObject {
         [.all(title: "全部 Apple Music 歌单", count: applePlaylists.reduce(0) { $0 + $1.count })] + applePlaylists
     }
 
+    var isFilteringToSelectedApplePlaylist: Bool {
+        selectedApplePlaylistID != MusicPlaylistOption.allID
+    }
+
     var appleMusicStatusText: String {
         appleMusicConnected ? "已连接" : "请求系统授权"
     }
@@ -3233,7 +3304,7 @@ private final class MusicConnectionManager: ObservableObject {
                 : nil
             let magicColor = artworkImage?.magicAverageColor ?? UIColor(songPalette: palettes[index % palettes.count])
             return DemoSong(
-                id: 10_000 + index,
+                id: stableMediaSongID(for: item, fallbackIndex: index),
                 title: item.title ?? "Untitled",
                 artist: item.artist ?? "Unknown Artist",
                 colors: palettes[index % palettes.count],
@@ -3251,11 +3322,13 @@ private final class MusicConnectionManager: ObservableObject {
             guard let albumID = song.albumPersistentID, result[albumID] == nil else { return }
             result[albumID] = song
         }
-        libraryAlbumCards = makeAlbumCards(
-            from: appleMusicAlbumCollections(),
-            representativeSongsByAlbumID: representativeSongsByAlbumID,
-            palettes: palettes
-        )
+        libraryAlbumCards = selectedApplePlaylistID == MusicPlaylistOption.allID
+            ? makeAlbumCards(
+                from: appleMusicAlbumCollections(),
+                representativeSongsByAlbumID: representativeSongsByAlbumID,
+                palettes: palettes
+            )
+            : []
         suppressSongCacheRebuild = false
         rebuildSongCaches()
         message = librarySongs.isEmpty
@@ -3873,7 +3946,7 @@ private final class MusicConnectionManager: ObservableObject {
         let palette = DemoSong.library[paletteIndex].colors
         let magicColor = artworkImage?.magicAverageColor ?? UIColor(songPalette: palette)
         return DemoSong(
-            id: 900_000 + abs(item.title?.hashValue ?? Int(item.persistentID) % 80_000),
+            id: stableMediaSongID(for: item),
             title: item.title ?? "Untitled",
             artist: item.artist ?? "Unknown Artist",
             colors: palette,
@@ -3886,6 +3959,14 @@ private final class MusicConnectionManager: ObservableObject {
             magicColor: Color(uiColor: magicColor),
             source: .library
         )
+    }
+
+    // Playlist queries return the same media items in different orders. Their persistent ID,
+    // unlike a list index, is safe to use for view and artwork-cache identity.
+    private func stableMediaSongID(for item: MPMediaItem, fallbackIndex: Int = 0) -> Int {
+        let persistentID = item.persistentID
+        guard persistentID != 0 else { return 10_000 + fallbackIndex }
+        return Int(persistentID & 0x3FFF_FFFF_FFFF_FFFF)
     }
 
     private func enrichedSong(_ song: DemoSong, with item: MPMediaItem) -> DemoSong {
