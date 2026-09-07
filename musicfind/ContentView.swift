@@ -202,7 +202,10 @@ struct ContentView: View {
                         if musicConnector.isPlaying {
                             HeaderNowPlayingBadge(song: playerDisplaySong)
                         } else {
-                            GreetingBadge(mood: currentTimeMood, isPaused: isPlayerCardVisible)
+                            GreetingBadge(
+                                mood: currentTimeMood,
+                                isPaused: isPlayerCardVisible || scenePhase != .active
+                            )
                         }
                     }
                     Spacer()
@@ -243,32 +246,35 @@ struct ContentView: View {
                         .ignoresSafeArea()
 
                     GeometryReader { cardProxy in
+                        let playerIsLandscape = cardProxy.size.width > cardProxy.size.height
                         let cardWidth = max(250, (cardProxy.size.width - 16) * 0.92)
                         let cardHeight = max(460, (cardProxy.size.height - 80) * 0.82)
                         let resolvedCardWidth = min(cardWidth, cardProxy.size.width - 12)
                         let resolvedCardHeight = min(cardHeight + 60, cardProxy.size.height - 24)
 
-                        VStack(spacing: 0) {
-                            FluidPlayerOverlay(
-                                songs: stablePlayerCardSongs,
-                                nowPlaying: playerDisplaySong,
-                                isPlaying: musicConnector.isPlaying,
-                                isContentVisible: isPlayerCardContentVisible,
-                                onClose: hidePlayerCard,
-                                onSwipeDismiss: completePlayerCardDismiss,
-                                onTogglePlayback: toggleCurrentPlayback,
-                                onSongChange: { song in
-                                    musicConnector.queuePlaybackPreservingOrder(
-                                        for: song,
-                                        in: stablePlayerCardSongs
-                                    )
-                                }
-                            )
-                            .frame(width: resolvedCardWidth, height: resolvedCardHeight)
-                        }
+                        FluidPlayerOverlay(
+                            songs: stablePlayerCardSongs,
+                            nowPlaying: playerDisplaySong,
+                            isPlaying: musicConnector.isPlaying,
+                            isContentVisible: isPlayerCardContentVisible,
+                            isLandscape: playerIsLandscape,
+                            onClose: hidePlayerCard,
+                            onSwipeDismiss: completePlayerCardDismiss,
+                            onTogglePlayback: toggleCurrentPlayback,
+                            onSongChange: { song in
+                                musicConnector.queuePlaybackPreservingOrder(
+                                    for: song,
+                                    in: stablePlayerCardSongs
+                                )
+                            }
+                        )
+                        .frame(
+                            width: playerIsLandscape ? cardProxy.size.width : resolvedCardWidth,
+                            height: playerIsLandscape ? cardProxy.size.height : resolvedCardHeight
+                        )
                         .position(
                             x: cardProxy.size.width / 2,
-                            y: cardProxy.size.height * 0.46 + 30
+                            y: playerIsLandscape ? cardProxy.size.height / 2 : cardProxy.size.height * 0.46 + 30
                         )
                     }
                 }
@@ -338,6 +344,13 @@ struct ContentView: View {
         .onChange(of: scenePhase) { _, newPhase in
             musicConnector.handleScenePhase(newPhase)
             updateIdleTimerState()
+            if isHomeSurfaceVisible {
+                shakeObserver.start()
+                scheduleHomeIdleDrift()
+            } else {
+                shakeObserver.stop()
+                stopHomeDrift()
+            }
         }
         .onDisappear {
             musicConnector.stopPlaybackSync()
@@ -354,8 +367,10 @@ struct ContentView: View {
         }
         .onChange(of: activeTab) { _, newValue in
             if newValue == .home {
+                if isHomeSurfaceVisible { shakeObserver.start() }
                 scheduleHomeIdleDrift()
             } else {
+                shakeObserver.stop()
                 stopHomeDrift()
             }
         }
@@ -1434,7 +1449,7 @@ struct ContentView: View {
     }
 
     private var isHomeSurfaceVisible: Bool {
-        activeTab != .settings && isPlayerCardVisible == false
+        scenePhase == .active && activeTab != .settings && isPlayerCardVisible == false
     }
 
     private func topOffset(for column: Int) -> CGFloat {
@@ -3854,13 +3869,13 @@ private final class MusicConnectionManager: ObservableObject {
 
     private func syncPlaybackState() {
         if let previewAudioPlayer {
-            isPlaying = isPlaybackTransitioning ? true : previewAudioPlayer.timeControlStatus == .playing
+            publishObservedPlayingState(isPlaybackTransitioning || previewAudioPlayer.timeControlStatus == .playing)
             return
         }
 
         let player = musicPlayer
         let playbackState = player.playbackState
-        isPlaying = isPlaybackTransitioning ? true : playbackState == .playing
+        publishObservedPlayingState(isPlaybackTransitioning || playbackState == .playing)
         guard let item = player.nowPlayingItem else {
             guard isPlaybackTransitioning == false else { return }
             handlePlaybackStoppedIfNeeded(player: player)
@@ -3876,18 +3891,97 @@ private final class MusicConnectionManager: ObservableObject {
         }
 
         if let matchedSong = song(matching: item) {
-            currentSong = matchedSong
-            playingSongID = matchedSong.id
+            publishObservedSong(matchedSong)
         } else {
             let fallback = song(from: item)
-            currentSong = fallback
-            playingSongID = fallback.id
+            publishObservedSong(fallback)
         }
         if (playbackState == .stopped || shouldAutoAdvanceFromPausedPlayback(player: player, item: item)),
            isPlaybackTransitioning == false {
             handlePlaybackStoppedIfNeeded(player: player)
         }
     }
+
+    private func publishObservedPlayingState(_ playing: Bool) {
+        if isPlaying != playing { isPlaying = playing }
+    }
+
+    private func publishObservedSong(_ song: DemoSong) {
+        if currentSong?.hasSamePlaybackPresentation(as: song) != true {
+            currentSong = song
+        }
+        if playingSongID != song.id { playingSongID = song.id }
+    }
+
+#if DEBUG
+    static func publicationRegressionCounts() -> [String: Int] {
+        let manager = MusicConnectionManager()
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 16, height: 16)).image { context in
+            UIColor.red.setFill()
+            context.fill(CGRect(x: 0, y: 0, width: 16, height: 16))
+        }
+        let otherImage = UIGraphicsImageRenderer(size: CGSize(width: 16, height: 16)).image { context in
+            UIColor.blue.setFill()
+            context.fill(CGRect(x: 0, y: 0, width: 16, height: 16))
+        }
+        func fixture(id: Int = 1, title: String = "Title", artist: String = "Artist", lyrics: String = "Line", color: Color = .cyan, artwork: UIImage? = nil, backdrop: UIImage? = nil) -> DemoSong {
+            DemoSong(id: id, title: title, artist: artist, colors: [color], artworkImage: artwork ?? image, backdropImage: backdrop ?? image, lyricsText: lyrics)
+        }
+        var count = 0
+        let observation = manager.objectWillChange.sink { count += 1 }
+        defer { observation.cancel() }
+        let baseline = fixture()
+        manager.publishObservedPlayingState(true)
+        manager.publishObservedSong(baseline)
+        var results = ["initial": count]
+        count = 0
+        for _ in 0..<100 {
+            manager.publishObservedPlayingState(true)
+            manager.publishObservedSong(fixture())
+        }
+        results["duplicates"] = count
+        for (name, song) in [
+            ("title", fixture(title: "New title")),
+            ("artist", fixture(artist: "New artist")),
+            ("lyrics", fixture(lyrics: "New line")),
+            ("color", fixture(color: .pink)),
+            ("artwork", fixture(artwork: otherImage)),
+            ("backdrop", fixture(backdrop: otherImage)),
+            ("track", fixture(id: 2))
+        ] {
+            manager.publishObservedSong(baseline)
+            count = 0
+            manager.publishObservedSong(song)
+            results[name] = count
+        }
+        count = 0
+        manager.publishObservedPlayingState(false)
+        manager.publishObservedPlayingState(false)
+        results["pause"] = count
+        count = 0
+        manager.publishObservedPlayingState(true)
+        manager.publishObservedPlayingState(true)
+        results["resume"] = count
+
+        let mediaItem = PlaybackRegressionMediaItem()
+        let cachedBackdrop = image.playerBackdropImage!
+        let cachedSong = fixture(backdrop: cachedBackdrop)
+        manager.publishObservedSong(cachedSong)
+        let firstEnriched = manager.enrichedSong(cachedSong, with: mediaItem)
+        results["backdropReuse"] = firstEnriched.backdropImage === cachedBackdrop ? 1 : 0
+        manager.publishObservedSong(firstEnriched)
+        count = 0
+        for _ in 0..<100 {
+            manager.publishObservedSong(manager.enrichedSong(cachedSong, with: mediaItem))
+        }
+        results["enrichedDuplicates"] = count
+        let replacementBackdrop = otherImage.playerBackdropImage!
+        let replacementSong = fixture(artwork: otherImage, backdrop: replacementBackdrop)
+        let replacement = manager.enrichedSong(replacementSong, with: mediaItem)
+        results["backdropReplacement"] = replacement.backdropImage === replacementBackdrop ? 1 : 0
+        return results
+    }
+#endif
 
     private func shouldAutoAdvanceFromPausedPlayback(player: MPMusicPlayerController, item: MPMediaItem) -> Bool {
         guard shouldAutoAdvancePlayback, player.playbackState == .paused else { return false }
@@ -3974,6 +4068,15 @@ private final class MusicConnectionManager: ObservableObject {
         let magicColor = song.artworkImage == nil
             ? (artworkImage?.magicAverageColor.map(Color.init(uiColor:)) ?? song.magicColor)
             : song.magicColor
+        let backdropImage: UIImage?
+        // Repeated playback notifications must not recreate an unchanged artwork derivative.
+        if let artworkImage, let currentSong, currentSong.artworkImage === artworkImage {
+            backdropImage = currentSong.backdropImage ?? artworkImage.playerBackdropImage
+        } else if artworkImage === song.artworkImage, let existingBackdrop = song.backdropImage {
+            backdropImage = existingBackdrop
+        } else {
+            backdropImage = artworkImage?.playerBackdropImage ?? song.backdropImage
+        }
         return DemoSong(
             id: song.id,
             title: item.title ?? song.title,
@@ -3986,7 +4089,7 @@ private final class MusicConnectionManager: ObservableObject {
             previewURL: song.previewURL,
             artworkURL: song.artworkURL,
             artworkImage: artworkImage,
-            backdropImage: artworkImage?.playerBackdropImage ?? song.backdropImage,
+            backdropImage: backdropImage,
             lyricsText: Self.extractLyrics(from: item) ?? song.lyricsText,
             magicColor: magicColor,
             source: song.source
@@ -5482,11 +5585,14 @@ private final class MusicConnectionManager: ObservableObject {
 
 private struct BadgePhysicsPanel: View {
     let songs: [DemoSong]
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var motion = MotionGravityObserver()
     @State private var badges: [PhysicsBadge] = []
     @State private var lastSize: CGSize = .zero
     @State private var lastSongIDs: [Int] = []
     @State private var lastCollisionHapticAt: Date = .distantPast
+    @State private var isSimulationAwake = true
+    @State private var settledFrameCount = 0
 
     private let frameRate = Timer.publish(every: 1.0 / 20.0, on: .main, in: .common).autoconnect()
     private let minimumVisualMovement: CGFloat = 1.8
@@ -5510,6 +5616,9 @@ private struct BadgePhysicsPanel: View {
             .onDisappear {
                 motion.stop()
             }
+            .onChange(of: scenePhase) { _, phase in
+                if phase == .active { motion.start() } else { motion.stop() }
+            }
             .onChange(of: proxy.size) { _, newSize in
                 resetBadges(in: newSize)
             }
@@ -5517,7 +5626,12 @@ private struct BadgePhysicsPanel: View {
                 resetBadges(in: proxy.size, force: true)
             }
             .onReceive(frameRate) { _ in
+                guard scenePhase == .active else { return }
                 stepBadges(in: proxy.size)
+            }
+            .onReceive(motion.$gravity.dropFirst()) { _ in
+                settledFrameCount = 0
+                isSimulationAwake = true
             }
         }
     }
@@ -5533,6 +5647,8 @@ private struct BadgePhysicsPanel: View {
         guard size.width > 10, size.height > 10, force || sizeChanged || ids != lastSongIDs else { return }
         lastSize = size
         lastSongIDs = ids
+        settledFrameCount = 0
+        isSimulationAwake = true
         let columns: [CGFloat] = [0.13, 0.31, 0.49, 0.67, 0.85]
         badges = panelSongs.enumerated().map { index, song in
             let radius: CGFloat = [26, 30, 24, 28, 32, 25, 29, 27][index % 8]
@@ -5549,7 +5665,10 @@ private struct BadgePhysicsPanel: View {
     }
 
     private func stepBadges(in size: CGSize) {
-        guard size.width > 10, size.height > 10, badges.isEmpty == false else { return }
+        guard isSimulationAwake,
+              size.width > 10,
+              size.height > 10,
+              badges.isEmpty == false else { return }
 
         var next = badges
         var strongestImpact: CGFloat = 0
@@ -5607,7 +5726,16 @@ private struct BadgePhysicsPanel: View {
             }
         }
 
-        guard largestMovement >= minimumVisualMovement || strongestImpact > 0 else { return }
+        let hasVisibleMovement = largestMovement >= minimumVisualMovement || strongestImpact > 12
+        if hasVisibleMovement == false {
+            settledFrameCount += 1
+            if settledFrameCount >= 10 {
+                isSimulationAwake = false
+            }
+            return
+        }
+
+        settledFrameCount = 0
         badges = next
         triggerCollisionHapticIfNeeded(strength: strongestImpact)
     }
@@ -5733,7 +5861,7 @@ private final class ShakeMotionObserver: ObservableObject {
     private var lastAcceleration: CMAcceleration?
 
     func start() {
-        guard manager.isAccelerometerAvailable else { return }
+        guard manager.isAccelerometerAvailable, !manager.isAccelerometerActive else { return }
         shakeStrikeCount = 0
         lastStrikeDate = .distantPast
         lastMagnitude = 1.0
@@ -6159,6 +6287,7 @@ private struct FluidPlayerOverlay: View {
     let nowPlaying: DemoSong
     let isPlaying: Bool
     let isContentVisible: Bool
+    let isLandscape: Bool
     let onClose: () -> Void
     let onSwipeDismiss: () -> Void
     let onTogglePlayback: () -> Void
@@ -6179,8 +6308,12 @@ private struct FluidPlayerOverlay: View {
     @State private var playbackHandoffTask: Task<Void, Never>?
     @State private var spatialMotion = SpatialArtworkMotionObserver()
     @State private var isShareComposerPresented = false
+    @State private var thermalState = ProcessInfo.processInfo.thermalState
 
     private var transitionDuration: Double { reduceMotion ? 0.22 : 0.56 }
+    private var visualsActive: Bool {
+        scenePhase == .active && isContentVisible && !isShareComposerPresented
+    }
     var body: some View {
         let palette = PlayerPaletteCache.shared.palette(for: currentSong)
 
@@ -6190,8 +6323,9 @@ private struct FluidPlayerOverlay: View {
                 FluidPlayerBackdrop(
                     song: currentSong,
                     isPlaying: isPlaying,
-                    isMotionEnabled: !isTransitioning && !isSwipeInteracting && scenePhase == .active && isContentVisible,
-                    detailMotionChannel: spatialMotion.detailChannel
+                    isMotionEnabled: !isTransitioning && !isSwipeInteracting && visualsActive,
+                    detailMotionChannel: spatialMotion.detailChannel,
+                    isLandscape: isLandscape
                 )
 
                 if let targetSong {
@@ -6199,7 +6333,8 @@ private struct FluidPlayerOverlay: View {
                         song: targetSong,
                         isPlaying: isPlaying,
                         isMotionEnabled: false,
-                        detailMotionChannel: spatialMotion.detailChannel
+                        detailMotionChannel: spatialMotion.detailChannel,
+                        isLandscape: isLandscape
                     )
                         .mask {
                             if reduceMotion {
@@ -6217,16 +6352,22 @@ private struct FluidPlayerOverlay: View {
 
                 FluidPlayerPage(
                     song: currentSong,
-                    isPlaying: isPlaying && scenePhase == .active && isContentVisible
+                    isPlaying: isPlaying && visualsActive,
+                    isLandscape: isLandscape,
+                    motionChannel: spatialMotion.detailChannel
                 )
+                .environment(\.playerVisualsActive, visualsActive)
                 .offset(x: currentPageOffset(width: proxy.size.width))
                 .opacity(Double(currentPageOpacity))
 
                 if let targetSong {
                     FluidPlayerPage(
                         song: targetSong,
-                        isPlaying: isPlaying && scenePhase == .active && isContentVisible
+                        isPlaying: isPlaying && visualsActive,
+                        isLandscape: isLandscape,
+                        motionChannel: spatialMotion.detailChannel
                     )
+                    .environment(\.playerVisualsActive, visualsActive)
                     .offset(x: targetPageOffset(width: proxy.size.width))
                     .opacity(Double(targetPageOpacity))
                     .allowsHitTesting(false)
@@ -6259,9 +6400,27 @@ private struct FluidPlayerOverlay: View {
                     .position(x: proxy.size.width / 2, y: proxy.size.height / 2)
                     .accessibilityHidden(true)
 
-                Button(action: onClose) {
-                    ZStack {
-                        Image(systemName: "chevron.down")
+                if isLandscape == false {
+                    Button(action: onClose) {
+                        ZStack {
+                            Image(systemName: "chevron.down")
+                                .font(.headline.weight(.bold))
+                                .foregroundStyle(palette.primaryText)
+                                .frame(width: 44, height: 44)
+                                .liquidGlassSurface(cornerRadius: 22, isInteractive: true)
+                        }
+                        .frame(width: 64, height: 64)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("关闭播放器")
+                    .position(x: 34, y: topInset + 28)
+                    .zIndex(50)
+
+                    Button {
+                        isShareComposerPresented = true
+                    } label: {
+                        Image(systemName: "square.and.arrow.up")
                             .font(.headline.weight(.bold))
                             .foregroundStyle(palette.primaryText)
                             .frame(width: 44, height: 44)
@@ -6269,52 +6428,42 @@ private struct FluidPlayerOverlay: View {
                     }
                     .frame(width: 64, height: 64)
                     .contentShape(Rectangle())
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("分享正在播放的歌曲")
+                    .position(x: proxy.size.width - 34, y: topInset + 28)
+                    .zIndex(50)
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel("关闭播放器")
-                .position(x: 34, y: topInset + 28)
-                .zIndex(50)
-
-                Button {
-                    isShareComposerPresented = true
-                } label: {
-                    Image(systemName: "square.and.arrow.up")
-                        .font(.headline.weight(.bold))
-                        .foregroundStyle(palette.primaryText)
-                        .frame(width: 44, height: 44)
-                        .liquidGlassSurface(cornerRadius: 22, isInteractive: true)
-                }
-                .frame(width: 64, height: 64)
-                .contentShape(Rectangle())
-                .buttonStyle(.plain)
-                .accessibilityLabel("分享正在播放的歌曲")
-                .position(x: proxy.size.width - 34, y: topInset + 28)
-                .zIndex(50)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(.clear)
             .contentShape(Rectangle())
         }
-        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: isLandscape ? 0 : 24, style: .continuous))
         .background {
-            PlayerCardGlassAura(song: currentSong)
+            if isLandscape == false {
+                PlayerCardGlassAura(song: currentSong)
+            }
         }
         .overlay {
-            PlayerCardMotionChrome(
-                song: currentSong,
-                motionChannel: spatialMotion.detailChannel,
-                reduceMotion: reduceMotion
-            )
-            .allowsHitTesting(false)
-        }
-        .overlay {
-            RoundedRectangle(cornerRadius: 23, style: .continuous)
-                .inset(by: 2.2)
-                .stroke(.white.opacity(0.10), lineWidth: 0.8)
-                .blur(radius: 0.25)
+            if isLandscape == false {
+                PlayerCardMotionChrome(
+                    song: currentSong,
+                    motionChannel: spatialMotion.detailChannel,
+                    reduceMotion: reduceMotion
+                )
                 .allowsHitTesting(false)
+            }
         }
-        .compositingGroup()
+        .overlay {
+            if isLandscape == false {
+                RoundedRectangle(cornerRadius: 23, style: .continuous)
+                    .inset(by: 2.2)
+                    .stroke(.white.opacity(0.10), lineWidth: 0.8)
+                    .blur(radius: 0.25)
+                    .allowsHitTesting(false)
+            }
+        }
+        .modifier(PlayerConditionalCompositingGroup(isEnabled: isLandscape == false))
         .modifier(
             PlayerCardSpatialTransform(
                 motionChannel: spatialMotion.transformChannel,
@@ -6322,7 +6471,8 @@ private struct FluidPlayerOverlay: View {
                 dragOffset: dragOffset,
                 transitionProgress: transitionProgress,
                 transitionDirection: transitionDirection,
-                isTransitioning: isTransitioning
+                isTransitioning: isTransitioning,
+                isEnabled: isLandscape == false
             )
         )
         .offset(x: dragOffset * 0.12)
@@ -6331,23 +6481,23 @@ private struct FluidPlayerOverlay: View {
         .scaleEffect(isContentVisible ? 1 : 0.985)
         .animation(.easeOut(duration: 0.18), value: isContentVisible)
         .shadow(
-            color: palette.accent.opacity(0.08),
+            color: palette.accent.opacity(isLandscape ? 0 : 0.08),
             radius: 22,
             x: 0,
             y: 12
         )
         .shadow(
-            color: .black.opacity(0.48),
+            color: .black.opacity(isLandscape ? 0 : 0.48),
             radius: 28,
             x: 0,
             y: 18
         )
         .onAppear {
+            thermalState = ProcessInfo.processInfo.thermalState
+            spatialMotion.updateThermalState(thermalState)
             syncCurrentIndex()
             preloadNearbyArtwork()
-            if reduceMotion == false, scenePhase == .active {
-                spatialMotion.start()
-            }
+            updateSpatialMotionActivity()
         }
         .onChange(of: nowPlaying.id) { _, _ in
             guard !isTransitioning else { return }
@@ -6361,18 +6511,20 @@ private struct FluidPlayerOverlay: View {
             spatialMotion.stop()
         }
         .onChange(of: reduceMotion) { _, isReduced in
-            if isReduced || scenePhase != .active {
-                spatialMotion.stop()
-            } else {
-                spatialMotion.start()
-            }
+            updateSpatialMotionActivity()
         }
         .onChange(of: scenePhase) { _, phase in
-            if phase == .active, reduceMotion == false {
-                spatialMotion.start()
-            } else {
-                spatialMotion.stop()
-            }
+            updateSpatialMotionActivity()
+        }
+        .onChange(of: isShareComposerPresented) { _, _ in
+            updateSpatialMotionActivity()
+        }
+        .onChange(of: isContentVisible) { _, _ in
+            updateSpatialMotionActivity()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: ProcessInfo.thermalStateDidChangeNotification)) { _ in
+            thermalState = ProcessInfo.processInfo.thermalState
+            spatialMotion.updateThermalState(thermalState)
         }
         .sheet(isPresented: $isShareComposerPresented) {
             NowPlayingShareSheet(song: currentSong)
@@ -6382,6 +6534,14 @@ private struct FluidPlayerOverlay: View {
 
     private var isTransitioning: Bool {
         targetIndex != nil
+    }
+
+    private func updateSpatialMotionActivity() {
+        if visualsActive && !reduceMotion && !isSwipeInteracting && !isTransitioning && !isSwipeDismissing {
+            spatialMotion.start()
+        } else {
+            spatialMotion.pause()
+        }
     }
 
     private var verticalSwipeOpacity: Double {
@@ -6529,11 +6689,7 @@ private struct FluidPlayerOverlay: View {
 
     private func resumeSwipeMotionIfNeeded() {
         isSwipeInteracting = false
-        guard reduceMotion == false,
-              scenePhase == .active,
-              isContentVisible,
-              isTransitioning == false else { return }
-        spatialMotion.start()
+        updateSpatialMotionActivity()
     }
 
     @discardableResult
@@ -6578,9 +6734,7 @@ private struct FluidPlayerOverlay: View {
                 isSwipeInteracting = false
             }
             preloadNearbyArtwork()
-            if reduceMotion == false {
-                spatialMotion.start()
-            }
+            updateSpatialMotionActivity()
         }
         return true
     }
@@ -6645,7 +6799,48 @@ private struct FluidSwipeMask: View {
     }
 }
 
+private struct PlayerConditionalCompositingGroup: ViewModifier {
+    let isEnabled: Bool
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if isEnabled {
+            content.compositingGroup()
+        } else {
+            content
+        }
+    }
+}
+
 private struct PlayerCardSpatialTransform: ViewModifier {
+    let motionChannel: SpatialMotionChannel
+    let reduceMotion: Bool
+    let dragOffset: CGFloat
+    let transitionProgress: CGFloat
+    let transitionDirection: CGFloat
+    let isTransitioning: Bool
+    let isEnabled: Bool
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if isEnabled {
+            content.modifier(
+                ActivePlayerCardSpatialTransform(
+                    motionChannel: motionChannel,
+                    reduceMotion: reduceMotion,
+                    dragOffset: dragOffset,
+                    transitionProgress: transitionProgress,
+                    transitionDirection: transitionDirection,
+                    isTransitioning: isTransitioning
+                )
+            )
+        } else {
+            content
+        }
+    }
+}
+
+private struct ActivePlayerCardSpatialTransform: ViewModifier {
     @ObservedObject var motionChannel: SpatialMotionChannel
     let reduceMotion: Bool
     let dragOffset: CGFloat
@@ -6720,15 +6915,18 @@ private struct PlayerCardDiffuseLight: View {
     let parallax: CGSize
     let reduceMotion: Bool
 
-    @State private var isDrifting = false
-
     var body: some View {
-        GeometryReader { proxy in
-            let width = max(proxy.size.width, 1)
-            let height = max(proxy.size.height, 1)
-            let secondaryColor = song.colors.dropFirst().first ?? palette.accent
+        TimelineView(.animation(minimumInterval: 1.0 / 12.0, paused: reduceMotion)) { timeline in
+            let time = timeline.date.timeIntervalSinceReferenceDate
+            let firstProgress = reduceMotion ? 0 : (sin(time * .pi / 6.4 - .pi / 2) + 1) / 2
+            let secondProgress = reduceMotion ? 0 : (sin(time * .pi / 7.2 - .pi / 2) + 1) / 2
 
-            ZStack {
+            GeometryReader { proxy in
+                let width = max(proxy.size.width, 1)
+                let height = max(proxy.size.height, 1)
+                let secondaryColor = song.colors.dropFirst().first ?? palette.accent
+
+                ZStack {
                 LinearGradient(
                     stops: [
                         .init(color: song.magicColor.opacity(0.12), location: 0.00),
@@ -6740,95 +6938,95 @@ private struct PlayerCardDiffuseLight: View {
                     endPoint: .bottomTrailing
                 )
 
-                Ellipse()
-                    .fill(
-                        RadialGradient(
-                            stops: [
-                                .init(color: .white.opacity(0.10), location: 0.00),
-                                .init(color: palette.primaryText.opacity(0.17), location: 0.16),
-                                .init(color: song.magicColor.opacity(0.22), location: 0.40),
-                                .init(color: secondaryColor.opacity(0.11), location: 0.69),
-                                .init(color: .clear, location: 1.00)
-                            ],
-                            center: .center,
-                            startRadius: 0,
-                            endRadius: width * 0.56
-                        )
-                    )
-                    .frame(width: width * 1.16, height: height * 0.62)
-                    .blur(radius: 34)
-                    .drawingGroup(opaque: false, colorMode: .nonLinear)
+                PlayerDiffuseTexture(
+                    size: CGSize(width: width * 1.16, height: height * 0.62),
+                    endRadius: width * 0.56,
+                    stops: [
+                        .init(color: .white.opacity(0.10), location: 0.00),
+                        .init(color: palette.primaryText.opacity(0.17), location: 0.16),
+                        .init(color: song.magicColor.opacity(0.22), location: 0.40),
+                        .init(color: secondaryColor.opacity(0.11), location: 0.69),
+                        .init(color: .clear, location: 1.00)
+                    ],
+                    blurRadius: 34
+                )
+                    .equatable()
                     .position(
                         x: width * 0.24 + parallax.width * 30,
                         y: height * 0.36 + parallax.height * 22
                     )
                     .offset(
-                        x: isDrifting ? width * 0.07 : -width * 0.05,
-                        y: isDrifting ? height * 0.025 : -height * 0.018
+                        x: width * (-0.05 + CGFloat(firstProgress) * 0.12),
+                        y: height * (-0.018 + CGFloat(firstProgress) * 0.043)
                     )
-                    .scaleEffect(isDrifting ? 1.06 : 0.96)
-                    .animation(
-                        .easeInOut(duration: 6.4).repeatForever(autoreverses: true),
-                        value: isDrifting
-                    )
+                    .scaleEffect(0.96 + CGFloat(firstProgress) * 0.10)
 
-                Ellipse()
-                    .fill(
-                        RadialGradient(
-                            stops: [
-                                .init(color: secondaryColor.opacity(0.18), location: 0.00),
-                                .init(color: palette.accent.opacity(0.16), location: 0.34),
-                                .init(color: song.magicColor.opacity(0.075), location: 0.66),
-                                .init(color: .clear, location: 1.00)
-                            ],
-                            center: .center,
-                            startRadius: 0,
-                            endRadius: width * 0.48
-                        )
-                    )
-                    .frame(width: width * 0.94, height: height * 0.56)
-                    .blur(radius: 40)
-                    .drawingGroup(opaque: false, colorMode: .nonLinear)
+                PlayerDiffuseTexture(
+                    size: CGSize(width: width * 0.94, height: height * 0.56),
+                    endRadius: width * 0.48,
+                    stops: [
+                        .init(color: secondaryColor.opacity(0.18), location: 0.00),
+                        .init(color: palette.accent.opacity(0.16), location: 0.34),
+                        .init(color: song.magicColor.opacity(0.075), location: 0.66),
+                        .init(color: .clear, location: 1.00)
+                    ],
+                    blurRadius: 40
+                )
+                    .equatable()
                     .position(
                         x: width * 0.78 - parallax.width * 25,
                         y: height * 0.46 - parallax.height * 18
                     )
                     .offset(
-                        x: isDrifting ? -width * 0.06 : width * 0.05,
-                        y: isDrifting ? -height * 0.02 : height * 0.025
+                        x: width * (0.05 - CGFloat(secondProgress) * 0.11),
+                        y: height * (0.025 - CGFloat(secondProgress) * 0.045)
                     )
-                    .scaleEffect(isDrifting ? 0.95 : 1.05)
-                    .animation(
-                        .easeInOut(duration: 7.2).repeatForever(autoreverses: true),
-                        value: isDrifting
+                    .scaleEffect(1.05 - CGFloat(secondProgress) * 0.10)
+                }
+                .blendMode(.screen)
+                .mask {
+                    LinearGradient(
+                        stops: [
+                            .init(color: .clear, location: 0.00),
+                            .init(color: .clear, location: 0.20),
+                            .init(color: .white.opacity(0.28), location: 0.30),
+                            .init(color: .white, location: 0.43),
+                            .init(color: .white, location: 0.58),
+                            .init(color: .white.opacity(0.62), location: 0.68),
+                            .init(color: .white.opacity(0.16), location: 0.78),
+                            .init(color: .clear, location: 0.88)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
                     )
-            }
-            .blendMode(.screen)
-            .mask {
-                LinearGradient(
-                    stops: [
-                        .init(color: .clear, location: 0.00),
-                        .init(color: .clear, location: 0.20),
-                        .init(color: .white.opacity(0.28), location: 0.30),
-                        .init(color: .white, location: 0.43),
-                        .init(color: .white, location: 0.58),
-                        .init(color: .white.opacity(0.62), location: 0.68),
-                        .init(color: .white.opacity(0.16), location: 0.78),
-                        .init(color: .clear, location: 0.88)
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
+                }
             }
         }
         .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
         .allowsHitTesting(false)
-        .onAppear {
-            isDrifting = !reduceMotion
-        }
-        .onChange(of: reduceMotion) { _, isReduced in
-            isDrifting = !isReduced
-        }
+    }
+}
+
+private struct PlayerDiffuseTexture: View, Equatable {
+    let size: CGSize
+    let endRadius: CGFloat
+    let stops: [Gradient.Stop]
+    let blurRadius: CGFloat
+
+    var body: some View {
+        Ellipse()
+            .fill(
+                RadialGradient(
+                    stops: stops,
+                    center: .center,
+                    startRadius: 0,
+                    endRadius: endRadius
+                )
+            )
+            .frame(width: size.width, height: size.height)
+            .blur(radius: blurRadius)
+            .padding(blurRadius * 3)
+            .drawingGroup(opaque: false, colorMode: .nonLinear)
     }
 }
 
@@ -6868,13 +7066,11 @@ private struct FluidPlayerBackdrop: View {
     let song: DemoSong
     let isPlaying: Bool
     let isMotionEnabled: Bool
-    @ObservedObject var detailMotionChannel: SpatialMotionChannel
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let detailMotionChannel: SpatialMotionChannel
+    let isLandscape: Bool
 
     var body: some View {
         let palette = PlayerPaletteCache.shared.palette(for: song)
-        let shouldReduceMotion = reduceMotion || !isMotionEnabled
-        let parallax = shouldReduceMotion ? CGSize.zero : detailMotionChannel.parallax
 
         GeometryReader { proxy in
             let artworkHeight = proxy.size.height * 0.70
@@ -6882,6 +7078,7 @@ private struct FluidPlayerBackdrop: View {
             ZStack(alignment: .topLeading) {
                 MotionDrivenPlayerArtwork(song: song, motionChannel: detailMotionChannel)
                     .frame(width: proxy.size.width, height: artworkHeight)
+                    .opacity(isLandscape ? 0.14 : 1)
 
                 VStack(spacing: 0) {
                     Spacer(minLength: 0)
@@ -6951,40 +7148,9 @@ private struct FluidPlayerBackdrop: View {
                 PlayerCardDiffuseLight(
                     song: song,
                     palette: palette,
-                    parallax: parallax,
-                    reduceMotion: shouldReduceMotion
+                    parallax: .zero,
+                    reduceMotion: true
                 )
-
-                VStack(spacing: 0) {
-                    Spacer(minLength: 0)
-
-                    PlayerCardWaveLights(
-                        song: song,
-                        isPlaying: isPlaying,
-                        isMotionEnabled: isMotionEnabled
-                    )
-                        .frame(
-                            width: proxy.size.width + 84,
-                            height: proxy.size.height * 0.45
-                        )
-                        .opacity(1)
-                        .mask {
-                            LinearGradient(
-                                stops: [
-                                    .init(color: .clear, location: 0.00),
-                                    .init(color: .white.opacity(0.18), location: 0.14),
-                                    .init(color: .white.opacity(0.58), location: 0.36),
-                                    .init(color: .white.opacity(0.92), location: 0.62),
-                                    .init(color: .white, location: 0.80),
-                                    .init(color: .white.opacity(0.72), location: 1.00)
-                                ],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            )
-                        }
-                        .padding(.bottom, 2)
-                        .allowsHitTesting(false)
-                }
 
                 VStack(spacing: 0) {
                     Spacer(minLength: 0)
@@ -7009,10 +7175,28 @@ private struct FluidPlayerBackdrop: View {
     }
 }
 
+private struct MotionDrivenPlayerDiffuseLight: View {
+    let song: DemoSong
+    let palette: PlayerImmersivePalette
+    @ObservedObject var motionChannel: SpatialMotionChannel
+    let isMotionEnabled: Bool
+
+    var body: some View {
+        PlayerCardDiffuseLight(
+            song: song,
+            palette: palette,
+            parallax: isMotionEnabled ? motionChannel.parallax : .zero,
+            reduceMotion: !isMotionEnabled
+        )
+    }
+}
+
 private struct PlayerCardWaveLights: View {
     let song: DemoSong
     let isPlaying: Bool
     let isMotionEnabled: Bool
+    let frameInterval: TimeInterval
+    let rasterScale: CGFloat
 
     var body: some View {
         let palette = PlayerPaletteCache.shared.palette(for: song)
@@ -7020,7 +7204,7 @@ private struct PlayerCardWaveLights: View {
 
         TimelineView(
             .animation(
-                minimumInterval: 1.0 / 12.0,
+                minimumInterval: frameInterval,
                 paused: !isMotionEnabled || !isPlaying
             )
         ) { timeline in
@@ -7034,82 +7218,125 @@ private struct PlayerCardWaveLights: View {
                 let height = max(proxy.size.height, 1)
 
                 ZStack {
-                    Ellipse()
-                        .fill(
-                            RadialGradient(
-                                colors: [
-                                    secondaryCoverColor.opacity(0.29),
-                                    song.magicColor.opacity(0.76),
-                                    palette.accent.opacity(0.44),
-                                    song.magicColor.opacity(0.12),
-                                    .clear
-                                ],
-                                center: .center,
-                                startRadius: 0,
-                                endRadius: width * 0.72
-                            )
-                        )
-                        .frame(width: width * 1.66, height: height * 1.04)
+                    PlayerWaveRadialTexture(
+                        size: CGSize(width: width * 1.66, height: height * 1.04),
+                        endRadius: width * 0.72,
+                        colors: [
+                            secondaryCoverColor.opacity(0.29),
+                            song.magicColor.opacity(0.76),
+                            palette.accent.opacity(0.44),
+                            song.magicColor.opacity(0.12),
+                            .clear
+                        ],
+                        blurRadius: 26,
+                        rasterScale: rasterScale
+                    )
+                        .equatable()
                         .offset(
                             x: CGFloat(primaryWave) * width * 0.08,
                             y: height * (0.28 + CGFloat(secondaryWave) * 0.05)
                         )
-                        .blur(radius: 26)
                         .blendMode(.plusLighter)
 
-                    Capsule()
-                        .fill(
-                            LinearGradient(
-                                colors: [
-                                    .clear,
-                                    song.magicColor.opacity(0.40),
-                                    secondaryCoverColor.opacity(0.58),
-                                    song.magicColor.opacity(0.66),
-                                    palette.accent.opacity(0.36),
-                                    .clear
-                                ],
-                                startPoint: .leading,
-                                endPoint: .trailing
-                            )
-                        )
-                        .frame(width: width * 1.50, height: height * 0.40)
+                    PlayerWaveCapsuleTexture(
+                        size: CGSize(width: width * 1.50, height: height * 0.40),
+                        colors: [
+                            .clear,
+                            song.magicColor.opacity(0.40),
+                            secondaryCoverColor.opacity(0.58),
+                            song.magicColor.opacity(0.66),
+                            palette.accent.opacity(0.36),
+                            .clear
+                        ],
+                        blurRadius: 19,
+                        rasterScale: rasterScale
+                    )
+                        .equatable()
                         .rotationEffect(.degrees(primaryWave * 5.5))
                         .offset(
                             x: CGFloat(secondaryWave) * width * 0.10,
                             y: height * (0.08 + CGFloat(crestWave) * 0.09)
                         )
-                        .blur(radius: 19)
                         .blendMode(.plusLighter)
 
-                    Capsule()
-                        .fill(
-                            LinearGradient(
-                                colors: [
-                                    .clear,
-                                    palette.accent.opacity(0.32),
-                                    song.magicColor.opacity(0.54),
-                                    secondaryCoverColor.opacity(0.48),
-                                    palette.accent.opacity(0.36),
-                                    .clear
-                                ],
-                                startPoint: .leading,
-                                endPoint: .trailing
-                            )
-                        )
-                        .frame(width: width * 1.58, height: height * 0.34)
+                    PlayerWaveCapsuleTexture(
+                        size: CGSize(width: width * 1.58, height: height * 0.34),
+                        colors: [
+                            .clear,
+                            palette.accent.opacity(0.32),
+                            song.magicColor.opacity(0.54),
+                            secondaryCoverColor.opacity(0.48),
+                            palette.accent.opacity(0.36),
+                            .clear
+                        ],
+                        blurRadius: 22,
+                        rasterScale: rasterScale
+                    )
+                        .equatable()
                         .rotationEffect(.degrees(-secondaryWave * 4.5))
                         .offset(
                             x: CGFloat(primaryWave) * width * 0.12,
                             y: height * (0.38 + CGFloat(secondaryWave) * 0.07)
                         )
-                        .blur(radius: 22)
                         .blendMode(.plusLighter)
                 }
                 .frame(width: width, height: height)
-                .opacity(isPlaying ? 1 : 0)
+                .opacity(isPlaying ? 0.62 : 0)
                 .animation(.easeOut(duration: 0.24), value: isPlaying)
             }
         }
+    }
+}
+
+private struct PlayerWaveRadialTexture: View, Equatable {
+    let size: CGSize
+    let endRadius: CGFloat
+    let colors: [Color]
+    let blurRadius: CGFloat
+    let rasterScale: CGFloat
+
+    var body: some View {
+        let scale = min(max(rasterScale, 0.30), 1)
+
+        Ellipse()
+            .fill(
+                RadialGradient(
+                    colors: colors,
+                    center: .center,
+                    startRadius: 0,
+                    endRadius: endRadius
+                )
+            )
+            .frame(width: size.width * scale, height: size.height * scale)
+            .blur(radius: blurRadius * scale)
+            .padding(blurRadius * scale * 3)
+            .drawingGroup(opaque: false, colorMode: .nonLinear)
+            .scaleEffect(1 / scale)
+    }
+}
+
+private struct PlayerWaveCapsuleTexture: View, Equatable {
+    let size: CGSize
+    let colors: [Color]
+    let blurRadius: CGFloat
+    let rasterScale: CGFloat
+
+    var body: some View {
+        let scale = min(max(rasterScale, 0.30), 1)
+
+        Capsule()
+            .fill(
+                LinearGradient(
+                    colors: colors,
+                    startPoint: .leading,
+                    endPoint: .trailing
+                )
+            )
+            .frame(width: size.width * scale, height: size.height * scale)
+            .blur(radius: blurRadius * scale)
+            .padding(blurRadius * scale * 3)
+            .drawingGroup(opaque: false, colorMode: .nonLinear)
+            .scaleEffect(1 / scale)
     }
 }
 
@@ -7522,6 +7749,36 @@ private final class SpatialArtworkMotionObserver {
     private var lastDetailPublished = CGSize.zero
     private var lastTransformPublishTime = Date.distantPast
     private var lastDetailPublishTime = Date.distantPast
+    private var thermalState = ProcessInfo.processInfo.thermalState
+
+    private var motionUpdateInterval: TimeInterval {
+        switch thermalState {
+        case .nominal, .fair: return 1.0 / 16.0
+        case .serious: return 1.0 / 10.0
+        case .critical: return 1.0 / 6.0
+        @unknown default: return 1.0 / 10.0
+        }
+    }
+
+    private var transformPublishInterval: TimeInterval {
+        motionUpdateInterval
+    }
+
+    private var detailPublishInterval: TimeInterval {
+        switch thermalState {
+        case .nominal, .fair: return 1.0 / 8.0
+        case .serious: return 1.0 / 6.0
+        case .critical: return 1.0 / 4.0
+        @unknown default: return 1.0 / 6.0
+        }
+    }
+
+    func updateThermalState(_ state: ProcessInfo.ThermalState) {
+        thermalState = state
+        if manager.isDeviceMotionActive {
+            manager.deviceMotionUpdateInterval = motionUpdateInterval
+        }
+    }
 
     func start() {
 #if DEBUG
@@ -7541,7 +7798,7 @@ private final class SpatialArtworkMotionObserver {
         guard manager.isDeviceMotionAvailable, manager.isDeviceMotionActive == false else { return }
         baseline = nil
         smoothed = transformChannel.parallax
-        manager.deviceMotionUpdateInterval = 1.0 / 24.0
+        manager.deviceMotionUpdateInterval = motionUpdateInterval
         manager.startDeviceMotionUpdates(to: .main) { [weak self] deviceMotion, _ in
             guard let self, let gravity = deviceMotion?.gravity else { return }
             if baseline == nil {
@@ -7565,7 +7822,7 @@ private final class SpatialArtworkMotionObserver {
                 abs(smoothed.height - lastTransformPublished.height)
             )
             if transformDelta >= 0.010,
-               now.timeIntervalSince(lastTransformPublishTime) >= 1.0 / 24.0 {
+               now.timeIntervalSince(lastTransformPublishTime) >= transformPublishInterval {
                 lastTransformPublished = smoothed
                 lastTransformPublishTime = now
                 transformChannel.parallax = smoothed
@@ -7576,7 +7833,7 @@ private final class SpatialArtworkMotionObserver {
                 abs(smoothed.height - lastDetailPublished.height)
             )
             if detailDelta >= 0.024,
-               now.timeIntervalSince(lastDetailPublishTime) >= 1.0 / 12.0 {
+               now.timeIntervalSince(lastDetailPublishTime) >= detailPublishInterval {
                 lastDetailPublished = smoothed
                 lastDetailPublishTime = now
                 detailChannel.parallax = smoothed
@@ -7657,42 +7914,213 @@ private struct FluidPlayerLeadingArtwork: View {
     }
 }
 
-private struct FluidPlayerPage: View {
+private struct LandscapeFullHeightArtwork: View {
     let song: DemoSong
-    let isPlaying: Bool
+    let motionChannel: SpatialMotionChannel
 
     var body: some View {
         let palette = PlayerPaletteCache.shared.palette(for: song)
 
-        VStack(spacing: 0) {
-            Spacer(minLength: 0)
+        GeometryReader { proxy in
+            let imageWidth = proxy.size.width * 0.66
 
-            VStack(alignment: .leading, spacing: 16) {
-                SyncedLyricsPairView(song: song, palette: palette)
+            ZStack(alignment: .leading) {
+                LandscapeMotionArtworkImage(song: song, motionChannel: motionChannel)
+                    .frame(width: imageWidth, height: proxy.size.height)
 
-                HStack(spacing: 13) {
-                    RotatingPlayerArtwork(song: song, isPlaying: isPlaying)
-                        .frame(width: 48, height: 48)
+                Rectangle()
+                    .fill(.ultraThinMaterial)
+                    .opacity(0.12)
+                    .overlay {
+                        LinearGradient(
+                            colors: [
+                                Color(red: 0.015, green: 0.018, blue: 0.026).opacity(0.10),
+                                Color(red: 0.006, green: 0.008, blue: 0.014).opacity(0.11),
+                                .black.opacity(0.085)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    }
+                    .overlay {
+                        LinearGradient(
+                            stops: [
+                                .init(color: .white.opacity(0.028), location: 0.00),
+                                .init(color: .clear, location: 0.30),
+                                .init(color: palette.accent.opacity(0.10), location: 0.68),
+                                .init(color: song.magicColor.opacity(0.16), location: 1.00)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                        .blendMode(.plusLighter)
+                    }
+                    .overlay {
+                        RadialGradient(
+                            colors: [
+                                palette.accent.opacity(0.18),
+                                song.magicColor.opacity(0.07),
+                                .clear
+                            ],
+                            center: UnitPoint(x: 0.76, y: 0.48),
+                            startRadius: 0,
+                            endRadius: proxy.size.width * 0.54
+                        )
+                        .blur(radius: 28)
+                        .blendMode(.screen)
+                    }
+                    .mask {
+                        LinearGradient(
+                            stops: [
+                                .init(color: .clear, location: 0.00),
+                                .init(color: .clear, location: 0.30),
+                                .init(color: .white.opacity(0.10), location: 0.40),
+                                .init(color: .white.opacity(0.36), location: 0.52),
+                                .init(color: .white.opacity(0.72), location: 0.64),
+                                .init(color: .white.opacity(0.94), location: 0.76),
+                                .init(color: .white, location: 1.00)
+                            ],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    }
+            }
+            .clipped()
+        }
+    }
+}
 
-                    VStack(alignment: .leading, spacing: 5) {
-                        OneWayMarqueeTitle(
-                            text: song.title,
-                            color: palette.primaryText
+private struct LandscapeMotionArtworkImage: View {
+    let song: DemoSong
+    @ObservedObject var motionChannel: SpatialMotionChannel
+
+    var body: some View {
+        let parallax = motionChannel.parallax
+
+        SongArtworkLayer(song: song, contentMode: .fill)
+            .scaleEffect(1.045)
+            .offset(
+                x: parallax.width * 5,
+                y: parallax.height * 3
+            )
+            .saturation(1.04)
+            .contrast(1.02)
+            .mask {
+                LinearGradient(
+                    stops: [
+                        .init(color: .white, location: 0.00),
+                        .init(color: .white, location: 0.56),
+                        .init(color: .white.opacity(0.94), location: 0.66),
+                        .init(color: .white.opacity(0.66), location: 0.78),
+                        .init(color: .white.opacity(0.24), location: 0.90),
+                        .init(color: .clear, location: 1.00)
+                    ],
+                    startPoint: .leading,
+                    endPoint: .trailing
+                )
+            }
+    }
+}
+
+private struct FluidPlayerPage: View {
+    let song: DemoSong
+    let isPlaying: Bool
+    let isLandscape: Bool
+    let motionChannel: SpatialMotionChannel
+
+    var body: some View {
+        let palette = PlayerPaletteCache.shared.palette(for: song)
+
+        Group {
+            if isLandscape {
+                GeometryReader { proxy in
+                    let contentLeading = proxy.size.width * 0.52 + 28
+                    let lyricsRegionWidth = proxy.size.width - contentLeading - 42
+                    let lyricsRegionHeight = proxy.size.height * 0.46
+                    let lyricsRegionCenterY = proxy.size.height * 0.51
+
+                    ZStack(alignment: .leading) {
+                        LandscapeFullHeightArtwork(song: song, motionChannel: motionChannel)
+                            .frame(width: proxy.size.width, height: proxy.size.height)
+                            .frame(maxHeight: .infinity, alignment: .top)
+
+                        SyncedLyricsPairView(
+                            song: song,
+                            palette: palette,
+                            fontScale: 1.5,
+                            verticalOffset: 0,
+                            containerHeight: lyricsRegionHeight,
+                            contentAlignment: .leading,
+                            maximumLineCount: 4,
+                            minimumTextScale: 0.62
+                        )
+                        .frame(
+                            width: lyricsRegionWidth,
+                            height: lyricsRegionHeight,
+                            alignment: .center
+                        )
+                        .position(
+                            x: contentLeading + lyricsRegionWidth / 2,
+                            y: lyricsRegionCenterY
                         )
 
-                        Text(song.artist)
-                            .font(.body.weight(.medium))
-                            .foregroundStyle(palette.secondaryText)
-                            .lineLimit(1)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
+                        VStack(spacing: 0) {
+                            Spacer(minLength: 0)
 
-                FluidPlayerProgress(song: song)
+                            HStack(spacing: 13) {
+                                RotatingPlayerArtwork(song: song, isPlaying: isPlaying)
+                                    .frame(width: 48, height: 48)
+
+                                VStack(alignment: .leading, spacing: 5) {
+                                    OneWayMarqueeTitle(text: song.title, color: palette.primaryText)
+
+                                    Text(song.artist)
+                                        .font(.body.weight(.medium))
+                                        .foregroundStyle(palette.secondaryText)
+                                        .lineLimit(1)
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                        }
+                        .padding(.leading, 24)
+                        .padding(.bottom, 32)
+                        .frame(
+                            width: proxy.size.width * 0.46,
+                            height: proxy.size.height,
+                            alignment: .bottomLeading
+                        )
+                    }
+                    .frame(width: proxy.size.width, height: proxy.size.height)
+                }
+            } else {
+                VStack(spacing: 0) {
+                    Spacer(minLength: 0)
+
+                    VStack(alignment: .leading, spacing: 16) {
+                        SyncedLyricsPairView(song: song, palette: palette)
+
+                        HStack(spacing: 13) {
+                            RotatingPlayerArtwork(song: song, isPlaying: isPlaying)
+                                .frame(width: 48, height: 48)
+
+                            VStack(alignment: .leading, spacing: 5) {
+                                OneWayMarqueeTitle(text: song.title, color: palette.primaryText)
+
+                                Text(song.artist)
+                                    .font(.body.weight(.medium))
+                                    .foregroundStyle(palette.secondaryText)
+                                    .lineLimit(1)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                        FluidPlayerProgress(song: song)
+                    }
+                    .padding(.horizontal, 22)
+                    .padding(.bottom, 18)
+                }
             }
-            .padding(.horizontal, 22)
-            .padding(.bottom, 18)
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(song.title), \(song.artist)")
@@ -7700,6 +8128,50 @@ private struct FluidPlayerPage: View {
         .accessibilityValue(String(song.id))
     }
 }
+
+#if DEBUG
+private final class PlaybackRegressionMediaItem: MPMediaItem {
+    override func value(forProperty property: String) -> Any? { nil }
+}
+
+@MainActor
+func playbackPublicationRegressionCounts() -> [String: Int] {
+    MusicConnectionManager.publicationRegressionCounts()
+}
+
+@MainActor
+func playerPillAnimationRegressionView(time: TimeInterval?, color: Color, reference: Bool, size: CGSize = CGSize(width: 360, height: 84)) -> some View {
+    let song = DemoSong(id: -90002, title: "Rendering test", artist: "FlipMusic", colors: [color])
+    return ZStack {
+        LinearGradient(colors: [.black, Color(white: 0.25)], startPoint: .leading, endPoint: .trailing)
+        PlayerPillOrbitingRimLight(song: song, isPlaying: true, isActive: true, isMotionEnabled: time == nil)
+        PlayerPillRhythmLights(song: song, isPlaying: true, isMotionEnabled: time == nil)
+    }
+    .frame(width: size.width, height: size.height)
+    .clipped()
+    .environment(\.playerRenderTestTime, time)
+    .environment(\.playerAnimationReferenceEvaluation, reference)
+}
+
+@MainActor
+func playerRenderRegressionView(size: CGSize, artwork: UIImage, lyric: String) -> some View {
+    let song = DemoSong(
+        id: -90001,
+        title: "Playback layout regression with a long song title",
+        artist: "FlipMusic",
+        colors: [.cyan, .blue],
+        artworkImage: artwork,
+        lyricsText: "[00:00.00]\(lyric)"
+    )
+    return FluidPlayerOverlay(
+        songs: [song], nowPlaying: song, isPlaying: true,
+        isContentVisible: true, isLandscape: size.width > size.height,
+        onClose: {}, onSwipeDismiss: {}, onTogglePlayback: {}, onSongChange: { _ in }
+    )
+    .frame(width: size.width, height: size.height)
+    .environment(\.scenePhase, .active)
+}
+#endif
 
 private struct NowPlayingShareSheet: View {
     let song: DemoSong
@@ -8764,6 +9236,8 @@ private struct MarqueeTextWidthPreferenceKey: PreferenceKey {
 private struct OneWayMarqueeTitle: View {
     let text: String
     let color: Color
+    @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.playerVisualsActive) private var visualsActive
 
     private let gap: CGFloat = 36
     private let pointsPerSecond: CGFloat = 28
@@ -8838,6 +9312,8 @@ private struct OneWayMarqueeTitle: View {
             offset = 0
             restartAnimation()
         }
+        .onChange(of: visualsActive) { _, _ in restartAnimation() }
+        .onChange(of: scenePhase) { _, _ in restartAnimation() }
         .accessibilityLabel(text)
     }
 
@@ -8855,12 +9331,12 @@ private struct OneWayMarqueeTitle: View {
         withTransaction(transaction) {
             offset = 0
         }
-        guard shouldScroll else { return }
+        guard shouldScroll, visualsActive, scenePhase == .active else { return }
 
         let travelDistance = textWidth + gap
         let duration = max(6, travelDistance / pointsPerSecond)
         DispatchQueue.main.async {
-            guard self.shouldScroll else { return }
+            guard self.shouldScroll, self.visualsActive, self.scenePhase == .active else { return }
             withAnimation(.linear(duration: duration).repeatForever(autoreverses: false)) {
                 offset = -travelDistance
             }
@@ -8871,8 +9347,19 @@ private struct OneWayMarqueeTitle: View {
 private struct SyncedLyricsPairView: View {
     let song: DemoSong
     let palette: PlayerImmersivePalette
+    var fontScale: CGFloat = 1
+    var verticalOffset: CGFloat = -60
+    var containerHeight: CGFloat? = nil
+    var contentAlignment: Alignment = .bottomLeading
+    var maximumLineCount: Int? = nil
+    var minimumTextScale: CGFloat = 1
 
     @State private var lines: [SyncedLyricLine] = []
+    @State private var displayedLine = ""
+    @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.playerVisualsActive) private var visualsActive
+
+    private var shouldRefresh: Bool { visualsActive && scenePhase == .active && !lines.isEmpty }
 
     private var query: LRCLIBLyricsQuery {
         LRCLIBLyricsQuery(
@@ -8884,25 +9371,30 @@ private struct SyncedLyricsPairView: View {
     }
 
     var body: some View {
-        ZStack(alignment: .bottomLeading) {
+        ZStack(alignment: contentAlignment) {
             if lines.isEmpty == false {
-                TimelineView(.periodic(from: .now, by: 0.5)) { _ in
-                    let pair = visiblePair(at: playbackTimeForSong())
-
-                    Text(pair.current)
-                        .font(lyricFont(size: 36, text: pair.current))
-                        .foregroundStyle(palette.primaryText)
-                        .fixedSize(horizontal: false, vertical: true)
+                    Text(displayedLine)
+                    .font(lyricFont(size: 36 * fontScale, text: displayedLine))
+                    .foregroundStyle(palette.primaryText)
+                    .lineLimit(maximumLineCount)
+                    .minimumScaleFactor(minimumTextScale)
+                    .allowsTightening(true)
+                    .fixedSize(horizontal: false, vertical: maximumLineCount == nil)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .accessibilityElement(children: .combine)
-                .accessibilityLabel("同步歌词")
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel("同步歌词")
             }
         }
-        .frame(maxWidth: .infinity, minHeight: 90, maxHeight: 90, alignment: .bottomLeading)
-        .offset(y: -60)
+        .frame(
+            maxWidth: .infinity,
+            minHeight: containerHeight ?? 90 * fontScale,
+            maxHeight: containerHeight ?? 90 * fontScale,
+            alignment: contentAlignment
+        )
+        .offset(y: verticalOffset)
         .task(id: query) {
             lines = []
+            displayedLine = ""
             if let embedded = song.lyricsText {
                 let parsed = LRCLIBLRCParser.parse(embedded)
                 if parsed.isEmpty == false {
@@ -8915,6 +9407,20 @@ private struct SyncedLyricsPairView: View {
             guard Task.isCancelled == false else { return }
             lines = fetched ?? []
         }
+        .task(id: PlayerVisualRefreshID(songID: song.id, active: shouldRefresh)) {
+            guard shouldRefresh else { return }
+            while !Task.isCancelled {
+                refreshDisplayedLine()
+                do { try await Task.sleep(for: .milliseconds(500)) }
+                catch { return }
+            }
+        }
+        .onChange(of: lines) { _, _ in refreshDisplayedLine() }
+    }
+
+    private func refreshDisplayedLine() {
+        let text = visiblePair(at: playbackTimeForSong()).current
+        if displayedLine != text { displayedLine = text }
     }
 
     private func playbackTimeForSong() -> TimeInterval {
@@ -8978,7 +9484,7 @@ private struct RotatingPlayerArtwork: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 15.0, paused: !isPlaying || reduceMotion)) { timeline in
+        TimelineView(.animation(minimumInterval: 1.0 / 8.0, paused: !isPlaying || reduceMotion)) { timeline in
             let elapsed = timeline.date.timeIntervalSinceReferenceDate
             let rotation = reduceMotion ? 0 : elapsed.truncatingRemainder(dividingBy: 12) / 12 * 360
 
@@ -8998,14 +9504,16 @@ private struct RotatingPlayerArtwork: View {
 
 private struct FluidPlayerProgress: View {
     let song: DemoSong
+    @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.playerVisualsActive) private var visualsActive
+    @State private var elapsed: TimeInterval = 0
+    @State private var duration: TimeInterval = 0
+
+    private var shouldRefresh: Bool { visualsActive && scenePhase == .active }
 
     var body: some View {
         let palette = PlayerPaletteCache.shared.palette(for: song)
 
-        TimelineView(.periodic(from: .now, by: 1)) { _ in
-            let player = MPMusicPlayerController.systemMusicPlayer
-            let elapsed = max(0, player.currentPlaybackTime.isFinite ? player.currentPlaybackTime : 0)
-            let duration = max(0, player.nowPlayingItem?.playbackDuration ?? song.mediaItem?.playbackDuration ?? 0)
             let progress = duration > 0 ? min(max(elapsed / duration, 0), 1) : 0
 
             VStack(spacing: 8) {
@@ -9026,6 +9534,18 @@ private struct FluidPlayerProgress: View {
                 }
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(palette.secondaryText)
+            }
+        .task(id: PlayerVisualRefreshID(songID: song.id, active: shouldRefresh)) {
+            guard shouldRefresh else { return }
+            while !Task.isCancelled {
+                let player = MPMusicPlayerController.systemMusicPlayer
+                let time = player.currentPlaybackTime
+                let newElapsed = max(0, time.isFinite ? time : 0)
+                let newDuration = max(0, player.nowPlayingItem?.playbackDuration ?? song.mediaItem?.playbackDuration ?? 0)
+                if elapsed != newElapsed { elapsed = newElapsed }
+                if duration != newDuration { duration = newDuration }
+                do { try await Task.sleep(for: .seconds(1)) }
+                catch { return }
             }
         }
         .accessibilityElement(children: .ignore)
@@ -10067,6 +10587,7 @@ private struct TopSettingsButton: View {
 }
 
 private struct PlayerPill: View {
+    @Environment(\.scenePhase) private var scenePhase
     let song: DemoSong
     let isPlaying: Bool
     let isPlaybackLoading: Bool
@@ -10117,7 +10638,7 @@ private struct PlayerPill: View {
                 song: song,
                 isActive: isActive,
                 isPlaying: isPlaying,
-                isMotionEnabled: !isPlayerCardVisible
+                isMotionEnabled: !isPlayerCardVisible && scenePhase == .active
             )
 
             HStack(spacing: 10) {
@@ -10126,7 +10647,7 @@ private struct PlayerPill: View {
                     incomingSong: incomingSong,
                     flipProgress: flipProgress,
                     flipDirection: flipDirection,
-                    isPlaying: isPlaying && !isPlayerCardVisible,
+                    isPlaying: isPlaying && !isPlayerCardVisible && scenePhase == .active,
                     isPlaybackLoading: isPlaybackLoading,
                     swipeOffset: contentSwipeOffset,
                     dragFade: isTextVisible ? max(0.20, 1 - abs(boundedDragOffset) / 120) : 0
@@ -10759,14 +11280,33 @@ private struct PlayerPillOrbitingRimLight: View {
     let isPlaying: Bool
     let isActive: Bool
     let isMotionEnabled: Bool
+#if DEBUG
+    @Environment(\.playerRenderTestTime) private var testTime
+    @Environment(\.playerAnimationReferenceEvaluation) private var referenceEvaluation
+#endif
 
     var body: some View {
+        let cachedSpeed = 0.055 + song.rhythmEnergy * 0.025
+        let cachedPrimaryPhase = randomUnit(salt: 0.43)
+        let cachedSecondaryPhase = randomUnit(salt: 1.91)
+        let cachedPulsePhase = randomUnit(salt: 2.71)
         TimelineView(.animation(minimumInterval: 1.0 / 12.0, paused: !isMotionEnabled)) { timeline in
+#if DEBUG
+            let time = testTime ?? timeline.date.timeIntervalSinceReferenceDate
+            let speed = referenceEvaluation ? 0.055 + song.rhythmEnergy * 0.025 : cachedSpeed
+            let primaryPhase = referenceEvaluation ? randomUnit(salt: 0.43) : cachedPrimaryPhase
+            let secondaryPhase = referenceEvaluation ? randomUnit(salt: 1.91) : cachedSecondaryPhase
+            let pulsePhase = referenceEvaluation ? randomUnit(salt: 2.71) : cachedPulsePhase
+#else
             let time = timeline.date.timeIntervalSinceReferenceDate
-            let speed = 0.055 + song.rhythmEnergy * 0.025
-            let progress = positiveModulo(time * speed + randomUnit(salt: 0.43), 1)
-            let counterProgress = positiveModulo(1 - time * (speed * 0.62) + randomUnit(salt: 1.91), 1)
-            let pulse = 0.68 + 0.32 * sin(time * 0.9 + randomUnit(salt: 2.71) * .pi * 2)
+            let speed = cachedSpeed
+            let primaryPhase = cachedPrimaryPhase
+            let secondaryPhase = cachedSecondaryPhase
+            let pulsePhase = cachedPulsePhase
+#endif
+            let progress = positiveModulo(time * speed + primaryPhase, 1)
+            let counterProgress = positiveModulo(1 - time * (speed * 0.62) + secondaryPhase, 1)
+            let pulse = 0.68 + 0.32 * sin(time * 0.9 + pulsePhase * .pi * 2)
             let activeOpacity = isPlaying ? 1.0 : (isActive ? 0.22 : 0.10)
 
             GeometryReader { proxy in
@@ -10875,8 +11415,7 @@ private struct PlayerPillOrbitingRimLight: View {
             endRadius: width * 0.46
         )
         .frame(width: width, height: height)
-        .position(point)
-        .blur(radius: 14)
+        .modifier(PlayerPositionedBlur(position: point, radius: 14))
         .blendMode(.plusLighter)
         .opacity(opacity)
     }
@@ -10945,6 +11484,9 @@ private struct PlayerPillRhythmLights: View {
     let song: DemoSong
     let isPlaying: Bool
     let isMotionEnabled: Bool
+#if DEBUG
+    @Environment(\.playerRenderTestTime) private var testTime
+#endif
     private let bpm: Double
     private let orbitPhase: Double
     private let barSeeds: [BarSeed]
@@ -10985,7 +11527,11 @@ private struct PlayerPillRhythmLights: View {
             )
         ) { timeline in
             let fallbackTime = timeline.date.timeIntervalSinceReferenceDate
+#if DEBUG
+            let playbackTime = testTime ?? currentPlaybackTime(fallbackTime: fallbackTime)
+#else
             let playbackTime = currentPlaybackTime(fallbackTime: fallbackTime)
+#endif
             let beatPosition = playbackTime * bpm / 60.0
             let slidePosition = beatPosition * 0.18
             let orbitProgress = positiveModulo(beatPosition * 0.048 + orbitPhase, 1)
@@ -11046,8 +11592,7 @@ private struct PlayerPillRhythmLights: View {
                         endRadius: width * 0.34
                     )
                     .frame(width: width * 0.58, height: height * 1.62)
-                    .position(x: orbitX, y: orbitY)
-                    .blur(radius: 17)
+                    .modifier(PlayerPositionedBlur(position: CGPoint(x: orbitX, y: orbitY), radius: 17))
                     .blendMode(.plusLighter)
                     .opacity(isPlaying ? 0.88 : 0)
 
@@ -11063,8 +11608,7 @@ private struct PlayerPillRhythmLights: View {
                         endRadius: width * 0.26
                     )
                     .frame(width: width * 0.46, height: height * 1.28)
-                    .position(x: reverseOrbitX, y: reverseOrbitY)
-                    .blur(radius: 20)
+                    .modifier(PlayerPositionedBlur(position: CGPoint(x: reverseOrbitX, y: reverseOrbitY), radius: 20))
                     .blendMode(.plusLighter)
                     .opacity(isPlaying ? 0.58 : 0)
 
@@ -11975,6 +12519,16 @@ private struct DemoSong: Identifiable, Equatable {
         lhs.source == rhs.source &&
         (lhs.artworkImage != nil) == (rhs.artworkImage != nil) &&
         (lhs.backdropImage != nil) == (rhs.backdropImage != nil)
+    }
+
+    func hasSamePlaybackPresentation(as other: DemoSong) -> Bool {
+        self == other &&
+        colors == other.colors &&
+        magicColor == other.magicColor &&
+        lyricsText == other.lyricsText &&
+        artworkImage === other.artworkImage &&
+        backdropImage === other.backdropImage &&
+        mediaItem === other.mediaItem
     }
 
     var hasApplePlaybackSource: Bool {
