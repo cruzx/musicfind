@@ -19,7 +19,10 @@ import Photos
 
 struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
+    @AppStorage("duoOuterLayoutEnabled") private var duoOuterLayoutEnabled = false
+    @State private var isDuoQueuePresented = false
     @State private var activeTab: AppTab = .home
+    @State private var isFlexPlayerPresented = false
     @State private var nowPlaying = DemoSong.library[0]
     @StateObject private var musicConnector = MusicConnectionManager()
     @State private var isPlayerCardVisible = false
@@ -114,7 +117,10 @@ struct ContentView: View {
     var body: some View {
         GeometryReader { proxy in
             let isLandscape = proxy.size.width > proxy.size.height
+            let usesDuoLayout = duoOuterLayoutEnabled && !isLandscape
+            let duoRailWidth: CGFloat = usesDuoLayout ? 60 : 0
             let homeColumnCount = isLandscape ? 5 : 4
+            let duoTileWidth = max(0, (proxy.size.width - duoRailWidth - spacing * 5) / 4)
             let chromeOpacity = isLandscape ? 0.0 : 1.0
 
             ZStack {
@@ -122,7 +128,9 @@ struct ContentView: View {
                 .ignoresSafeArea()
 
             if activeTab == .settings {
-                ProfilePage(connector: musicConnector) {
+                ProfilePage(connector: musicConnector, onShowFlexPlayer: {
+                    isFlexPlayerPresented = true
+                }) {
                     withAnimation(.smooth(duration: 0.24, extraBounce: 0.0)) {
                         activeTab = .home
                     }
@@ -161,7 +169,7 @@ struct ContentView: View {
                             }
                         }
                         .frame(maxWidth: .infinity)
-                        .padding(.top, isLandscape ? 0 : topOffset(for: column))
+                        .padding(.top, usesDuoLayout ? (column.isMultiple(of: 2) ? 0 : (duoTileWidth + spacing) / 2) : (isLandscape ? 0 : topOffset(for: column)))
                         .offset(y: homeDriftOffset(for: column))
                     }
                 }
@@ -169,6 +177,7 @@ struct ContentView: View {
                 .padding(.top, isLandscape ? 0 : spacing)
                 .padding(.bottom, isLandscape ? spacing : 92)
             }
+            .padding(.trailing, duoRailWidth)
             .ignoresSafeArea(edges: isLandscape ? .all : [])
             .simultaneousGesture(
                 DragGesture(minimumDistance: 1)
@@ -209,6 +218,7 @@ struct ContentView: View {
                         }
                     }
                     Spacer()
+                    if !usesDuoLayout {
                     HStack(spacing: 6) {
                         if musicConnector.applePlaylistOptions.count > 1 {
                             HomePlaylistPicker(
@@ -226,9 +236,10 @@ struct ContentView: View {
                     }
                     .opacity(chromeOpacity)
                     .allowsHitTesting(!isLandscape)
+                    }
                 }
                 .padding(.leading, 20)
-                .padding(.trailing, 14)
+                .padding(.trailing, 14 + duoRailWidth)
                 .padding(.top, 12)
                 .offset(y: 10)
 
@@ -287,6 +298,7 @@ struct ContentView: View {
                 VStack {
                     Spacer()
                     BottomNavigationBar(
+                    maximumWidth: usesDuoLayout ? min(260, max(190, proxy.size.width - duoRailWidth - 32)) : 356,
                     nowPlaying: playerDisplaySong,
                     isPlaying: musicConnector.isPlaying,
                     isPlaybackLoading: musicConnector.isPlaybackTransitioning,
@@ -310,6 +322,7 @@ struct ContentView: View {
                     .padding(.horizontal, 8)
                     .padding(.bottom, 12)
                 }
+                .padding(.trailing, duoRailWidth)
                 .blur(radius: isPlayerCardVisible ? 0 : sceneBackdropBlur, opaque: false)
                 .opacity(isPlayerCardVisible ? 0 : 1)
                 .offset(y: isPlayerCardVisible ? 36 : 0)
@@ -317,6 +330,20 @@ struct ContentView: View {
                 .accessibilityHidden(isPlayerCardVisible)
                 .animation(.smooth(duration: 0.24, extraBounce: 0.0), value: activeTab)
                 .animation(.smooth(duration: 0.24, extraBounce: 0.0), value: isPlayerCardVisible)
+                .zIndex(8)
+            }
+
+            if usesDuoLayout && !isPlayerCardVisible {
+                VStack {
+                    Spacer()
+                    DuoHomeControls(
+                        onQueue: { isDuoQueuePresented = true },
+                        onSettings: { activeTab = .settings }
+                    )
+                    .padding(.bottom, 12)
+                }
+                .frame(width: duoRailWidth)
+                .frame(maxWidth: .infinity, alignment: .trailing)
                 .zIndex(8)
             }
 
@@ -329,6 +356,33 @@ struct ContentView: View {
             }
         }
         .coordinateSpace(name: "contentRoot")
+        .sheet(isPresented: $isDuoQueuePresented) {
+            DuoQueueSheet(
+                songs: playerPlaybackSongs,
+                currentSong: playerDisplaySong,
+                playlistSelection: musicConnector.selectedApplePlaylistID,
+                playlists: musicConnector.applePlaylistOptions,
+                onSelectPlaylist: musicConnector.selectApplePlaylist,
+                onSelect: { song in
+                    musicConnector.queuePlaybackPreservingOrder(for: song, in: playerPlaybackSongs)
+                }
+            )
+        }
+        .fullScreenCover(isPresented: $isFlexPlayerPresented) {
+            FlexPlayerView(
+                songs: playerPlaybackSongs.filter { $0.isPlayable && !$0.isPlaceholder },
+                nowPlaying: playerDisplaySong,
+                isPlaying: musicConnector.isPlaying,
+                isPlaybackLoading: musicConnector.isPlaybackTransitioning,
+                onClose: { isFlexPlayerPresented = false },
+                onTogglePlayback: {
+                    Task { await musicConnector.togglePlayback(for: playerDisplaySong, in: playerPlaybackSongs) }
+                },
+                onSongChange: { song in
+                    musicConnector.queuePlaybackPreservingOrder(for: song, in: playerPlaybackSongs)
+                }
+            )
+        }
         }
         .task {
             await musicConnector.refreshAppleMusicLibraryIfPossible()
@@ -384,6 +438,16 @@ struct ContentView: View {
                 scheduleHomeIdleDrift()
             }
         }
+        .onChange(of: isFlexPlayerPresented) { _, isPresented in
+            updateIdleTimerState()
+            if isPresented {
+                shakeObserver.stop()
+                stopHomeDrift()
+            } else if isHomeSurfaceVisible {
+                shakeObserver.start()
+                scheduleHomeIdleDrift()
+            }
+        }
         .onReceive(musicConnector.$songCacheRevision.dropFirst()) { _ in
             refreshAvailableHomeSongs()
             guard isHomeAppendingMore == false else { return }
@@ -411,7 +475,7 @@ struct ContentView: View {
     }
 
     private func updateIdleTimerState() {
-        UIApplication.shared.isIdleTimerDisabled = isPlayerCardVisible && scenePhase == .active
+        UIApplication.shared.isIdleTimerDisabled = (isPlayerCardVisible || isFlexPlayerPresented) && scenePhase == .active
     }
 
     private func playHomeSong(_ song: DemoSong) {
@@ -1449,7 +1513,7 @@ struct ContentView: View {
     }
 
     private var isHomeSurfaceVisible: Bool {
-        scenePhase == .active && activeTab != .settings && isPlayerCardVisible == false
+        scenePhase == .active && activeTab != .settings && !isPlayerCardVisible && !isFlexPlayerPresented
     }
 
     private func topOffset(for column: Int) -> CGFloat {
@@ -1815,7 +1879,9 @@ private struct InitialLibraryLoadingOverlay: View {
 
 private struct ProfilePage: View {
     @ObservedObject var connector: MusicConnectionManager
+    var onShowFlexPlayer: () -> Void = {}
     let onClose: () -> Void
+    @AppStorage("duoOuterLayoutEnabled") private var duoOuterLayoutEnabled = false
     @State private var isPrivacyPolicyPresented = false
 
     var body: some View {
@@ -1881,6 +1947,38 @@ private struct ProfilePage: View {
                     )
 
                     SourceSettingsPanel(connector: connector)
+
+                    Toggle(isOn: $duoOuterLayoutEnabled) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Duo 外屏布局").font(.headline)
+                            Text("四列错位封面，右侧队列与设置")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    .tint(Color(red: 0.76, green: 0.20, blue: 0.46))
+                    .padding(16)
+                    .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 20))
+                    .accessibilityIdentifier("duo-layout-toggle")
+
+                    Button(action: onShowFlexPlayer) {
+                        HStack(spacing: 12) {
+                            Image(systemName: "rectangle.split.1x2")
+                                .font(.system(size: 22))
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("悬停模式").font(.headline)
+                                Text("上屏歌词，下屏封面队列")
+                                    .font(.caption)
+                                    .foregroundStyle(.white.opacity(0.65))
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                        }
+                        .foregroundStyle(.white)
+                        .padding(16)
+                        .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 20))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("open-flex-player")
 
                     PlaylistCuratorPanel(connector: connector)
 
@@ -5928,6 +6026,7 @@ private final class ShakeMotionObserver: ObservableObject {
 }
 
 private struct BottomNavigationBar: View {
+    var maximumWidth: CGFloat = 356
     let nowPlaying: DemoSong
     let isPlaying: Bool
     let isPlaybackLoading: Bool
@@ -5949,7 +6048,7 @@ private struct BottomNavigationBar: View {
         let subtitleWidth = measuredTextWidth(subtitle, size: isPlaying ? 12 : 11, weight: .medium)
         let textWidth = max(titleWidth, subtitleWidth)
         let chromeWidth: CGFloat = 11 + 38 + 10 + 8 + 34 + 12
-        return min(max(chromeWidth + textWidth + 8, 190), 356)
+        return min(max(chromeWidth + textWidth + 8, 190), maximumWidth)
     }
 
     var body: some View {
@@ -6275,6 +6374,134 @@ private struct MusicParticleSpec {
     let coreTint: Color
     let style: Style
     let hasGlow: Bool
+}
+
+/// Manual tabletop presentation. A future SDK adapter can supply the active horizontal
+/// division region; screen orientation alone must never be treated as a hinge signal.
+private struct FlexPlayerView: View {
+    let songs: [DemoSong]
+    let nowPlaying: DemoSong
+    let isPlaying: Bool
+    let isPlaybackLoading: Bool
+    var divisionFrame: CGRect? = nil
+    let onClose: () -> Void
+    let onTogglePlayback: () -> Void
+    let onSongChange: (DemoSong) -> Void
+
+    @Environment(\.scenePhase) private var scenePhase
+    @Namespace private var namespace
+    @State private var pillFrame: CGRect = .zero
+
+    private func step(_ offset: Int) {
+        guard let index = songs.firstIndex(where: { $0.id == nowPlaying.id }), !songs.isEmpty else { return }
+        onSongChange(songs[(index + offset + songs.count) % songs.count])
+    }
+
+    var body: some View {
+        GeometryReader { proxy in
+            let layout = FlexPlayerLayout(size: proxy.size, divisionFrame: divisionFrame)
+            VStack(spacing: 0) {
+                ZStack(alignment: .topTrailing) {
+                    FluidPlayerOverlay(
+                        songs: songs.isEmpty ? [nowPlaying] : songs,
+                        nowPlaying: nowPlaying,
+                        isPlaying: isPlaying,
+                        isContentVisible: scenePhase == .active,
+                        isLandscape: true,
+                        onClose: onClose,
+                        onSwipeDismiss: onClose,
+                        onTogglePlayback: onTogglePlayback,
+                        onSongChange: onSongChange
+                    )
+                    .accessibilityIdentifier("flex-player-upper")
+
+                    Button(action: onClose) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .frame(width: 44, height: 44)
+                            .background(.ultraThinMaterial, in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .padding(10)
+                    .accessibilityLabel("退出悬停模式")
+                    .accessibilityIdentifier("close-flex-player")
+                }
+                .frame(height: layout.playerHeight)
+                .clipped()
+
+                Color.black
+                    .frame(height: layout.dividerHeight)
+                    .accessibilityHidden(true)
+
+                ZStack(alignment: .bottom) {
+                    if songs.isEmpty {
+                        ContentUnavailableView("暂无播放队列", systemImage: "music.note.list", description: Text("返回首页，连接音乐并选择歌曲"))
+                            .foregroundStyle(.white)
+                    } else {
+                        ScrollViewReader { scrollProxy in
+                            ScrollView(showsIndicators: false) {
+                                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 5), spacing: 8) {
+                                    ForEach(songs) { song in
+                                        Button {
+                                            if song.id == nowPlaying.id {
+                                                onTogglePlayback()
+                                            } else {
+                                                onSongChange(song)
+                                            }
+                                        } label: {
+                                            SongSquare(song: song, isPlaying: song.id == nowPlaying.id, isMotionPaused: scenePhase != .active)
+                                                .aspectRatio(1, contentMode: .fit)
+                                                .overlay {
+                                                    if song.id == nowPlaying.id {
+                                                        RoundedRectangle(cornerRadius: 8)
+                                                            .strokeBorder(.white.opacity(0.70), lineWidth: 1.5)
+                                                    }
+                                                }
+                                        }
+                                        .buttonStyle(.plain)
+                                        .id(song.id)
+                                        .accessibilityLabel("\(song.title)，\(song.artist)")
+                                        .accessibilityValue(song.id == nowPlaying.id ? (isPlaying ? "正在播放" : "已暂停") : "待播放")
+                                        .accessibilityIdentifier("flex-song-\(song.id)")
+                                    }
+                                }
+                                .padding(.horizontal, 8)
+                                .padding(.top, 8)
+                                // Last row can scroll fully above the floating player.
+                                .padding(.bottom, 85)
+                            }
+                            .accessibilityIdentifier("flex-player-queue")
+                            .onAppear { scrollProxy.scrollTo(nowPlaying.id, anchor: .top) }
+                        }
+
+                        BottomNavigationBar(
+                            nowPlaying: nowPlaying,
+                            isPlaying: isPlaying,
+                            isPlaybackLoading: isPlaybackLoading,
+                            nextSong: nil,
+                            namespace: namespace,
+                            isPlayerCardVisible: false,
+                            isDropTargeted: false,
+                            playerPillFrame: $pillFrame,
+                            onPlayerTap: onTogglePlayback,
+                            onTogglePlayback: onTogglePlayback,
+                            onPrevious: { step(-1) },
+                            onNext: { step(1) },
+                            onMoodSeek: { step($0 < 0 ? -1 : 1) }
+                        )
+                        .padding(.bottom, 12)
+                    }
+                }
+                .frame(height: layout.queueHeight)
+                .clipped()
+                .background(Color(red: 0, green: 0.027, blue: 0.098))
+            }
+        }
+        .background(.black)
+        .preferredColorScheme(.dark)
+        .coordinateSpace(name: "contentRoot")
+    }
 }
 
 private struct FluidPlayerOverlay: View {
@@ -8130,6 +8357,40 @@ private struct FluidPlayerPage: View {
 }
 
 #if DEBUG
+/// Local-only fixture: no music account or network required for layout/interaction QA.
+struct FlexPlayerPreview: View {
+    @State private var selectedIndex = 0
+    @State private var playing = true
+    @State private var closed = false
+    private let tracks: [DemoSong] = (0..<20).map { index in
+        let color = [UIColor.systemTeal, .systemOrange, .systemIndigo, .systemPink, .systemBlue][index % 5]
+        let artwork = UIGraphicsImageRenderer(size: CGSize(width: 400, height: 400)).image { context in
+            color.withAlphaComponent(0.6).setFill()
+            context.fill(CGRect(x: 0, y: 0, width: 400, height: 400))
+            UIColor.black.withAlphaComponent(0.3).setFill()
+            context.fill(CGRect(x: 0, y: 200, width: 400, height: 200))
+            UIColor.white.withAlphaComponent(0.8).setFill()
+            context.cgContext.fillEllipse(in: CGRect(x: 240, y: 50, width: 95, height: 95))
+            ("FLIP / \(index + 1)" as NSString).draw(at: CGPoint(x: 25, y: 320), withAttributes: [.font: UIFont.systemFont(ofSize: 38, weight: .bold), .foregroundColor: UIColor.white])
+        }
+        return DemoSong(id: 91000 + index, title: index == 0 ? "夜航" : "音乐 \(index + 1)", artist: "林间电台", colors: [Color(color), .black], artworkImage: artwork, lyricsText: "[00:00.00]月光落在湖面\n[00:10.00]晚风带我远航")
+    }
+
+    var body: some View {
+        if closed {
+            Text("已退出悬停模式").accessibilityIdentifier("flex-preview-closed")
+        } else {
+            FlexPlayerView(
+                songs: ProcessInfo.processInfo.arguments.contains("--flex-empty") ? [] : tracks,
+                nowPlaying: tracks[selectedIndex], isPlaying: playing, isPlaybackLoading: false,
+                onClose: { closed = true },
+                onTogglePlayback: { playing.toggle() },
+                onSongChange: { song in selectedIndex = tracks.firstIndex(where: { $0.id == song.id })!; playing = true }
+            )
+        }
+    }
+}
+
 private final class PlaybackRegressionMediaItem: MPMediaItem {
     override func value(forProperty property: String) -> Any? { nil }
 }
@@ -10583,6 +10844,8 @@ private struct TopSettingsButton: View {
                 .contentShape(Circle())
         }
         .buttonStyle(.plain)
+        .accessibilityLabel("我的音乐")
+        .accessibilityIdentifier("open-my-music")
     }
 }
 
@@ -13051,4 +13314,101 @@ private struct HomeFlipSongSquare: View {
 
 #Preview {
     ContentView()
+}
+
+
+// Custom content controls only. Camera, clock and connectivity remain system-owned.
+private struct DuoHomeControls: View {
+    let onQueue: () -> Void
+    let onSettings: () -> Void
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+
+    var body: some View {
+        VStack(spacing: 4) {
+            Button(action: onQueue) {
+                Image(systemName: "music.note.list")
+                    .frame(width: 44, height: 44)
+            }
+            .accessibilityLabel("播放队列")
+            .accessibilityIdentifier("duo-queue")
+            Button(action: onSettings) {
+                Image(systemName: "gearshape")
+                    .frame(width: 44, height: 44)
+            }
+            .accessibilityLabel("我的音乐与设置")
+            .accessibilityIdentifier("duo-settings")
+        }
+        .font(.system(size: 21, weight: .semibold))
+        .foregroundStyle(.white)
+        .buttonStyle(.plain)
+        .padding(.vertical, 6)
+        .padding(.horizontal, 3)
+        .background {
+            Capsule()
+                .fill(.ultraThinMaterial)
+                .overlay {
+                    Capsule().fill(LinearGradient(
+                        colors: [Color(red: 0.61, green: 0.17, blue: 0.36).opacity(reduceTransparency ? 1 : 0.82),
+                                 Color(red: 0.34, green: 0.06, blue: 0.20).opacity(reduceTransparency ? 1 : 0.86)],
+                        startPoint: .topLeading, endPoint: .bottomTrailing))
+                }
+                .overlay {
+                    Capsule().strokeBorder(LinearGradient(
+                        colors: [.pink.opacity(0.8), .white.opacity(0.18), .pink.opacity(0.5)],
+                        startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 0.8)
+                }
+        }
+    }
+}
+
+private struct DuoQueueSheet: View {
+    let songs: [DemoSong]
+    let currentSong: DemoSong
+    let playlistSelection: String
+    let playlists: [MusicPlaylistOption]
+    let onSelectPlaylist: (String) -> Void
+    let onSelect: (DemoSong) -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if playlists.count > 1 {
+                    Picker("首页播放列表", selection: Binding(get: { playlistSelection }, set: onSelectPlaylist)) {
+                        ForEach(playlists) { option in
+                            Text(option.displayTitle).tag(option.id)
+                        }
+                    }
+                }
+                if songs.isEmpty {
+                    Text("暂无播放队列").foregroundStyle(.secondary)
+                }
+                ForEach(songs) { song in
+                    Button {
+                        onSelect(song)
+                        dismiss()
+                    } label: {
+                        HStack(spacing: 12) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(song.title).foregroundStyle(.primary)
+                                Text(song.artist).font(.caption).foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            if song.id == currentSong.id {
+                                Image(systemName: "waveform").foregroundStyle(.pink)
+                            }
+                        }
+                        .padding(.vertical, 6)
+                    }
+                }
+            }
+            .navigationTitle("播放队列")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("完成") { dismiss() }
+                }
+            }
+        }
+        .preferredColorScheme(.dark)
+    }
 }

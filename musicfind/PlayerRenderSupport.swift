@@ -1,5 +1,30 @@
 import SwiftUI
 
+struct FlexPlayerLayout {
+    let playerHeight: CGFloat
+    let dividerHeight: CGFloat
+    let queueHeight: CGFloat
+
+    init(size: CGSize, divisionFrame: CGRect? = nil) {
+        let height = max(0, size.height)
+        // Only a horizontal region spanning this view can split it top/bottom.
+        if let region = divisionFrame,
+           region.width >= size.width * 0.9,
+           region.width > region.height,
+           region.minY > 0, region.maxY < height {
+            playerHeight = region.minY
+            dividerHeight = region.height
+            queueHeight = height - region.maxY
+        } else {
+            // Manual preview: cap the upper pane to retain the landscape composition
+            // even on a narrow, non-folding iPhone.
+            dividerHeight = min(12, height)
+            playerHeight = min((height - dividerHeight) / 2, max(0, size.width) * 0.62)
+            queueHeight = height - dividerHeight - playerHeight
+        }
+    }
+}
+
 struct PlayerPositionedBlur: ViewModifier {
     let position: CGPoint
     let radius: CGFloat
