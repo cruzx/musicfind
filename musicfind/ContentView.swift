@@ -117,12 +117,13 @@ struct ContentView: View {
     }
 
     var body: some View {
+        NavigationStack {
         GeometryReader { proxy in
             let division = DuoGeometry.division(in: proxy)
             let showsAutomaticFold = division != nil && !dismissedAutomaticFold && activeTab != .settings
             let isLandscape = proxy.size.width > proxy.size.height
             let usesDuoLayout = duoOuterLayoutEnabled && !isLandscape
-            let duoRailWidth: CGFloat = usesDuoLayout ? 60 : 0
+            let duoRailWidth: CGFloat = 0
             let homeColumnCount = isLandscape ? 5 : 4
             let duoTileWidth = max(0, (proxy.size.width - duoRailWidth - spacing * 5) / 4)
             let chromeOpacity = isLandscape ? 0.0 : 1.0
@@ -337,20 +338,6 @@ struct ContentView: View {
                 .zIndex(8)
             }
 
-            if usesDuoLayout && !isPlayerCardVisible {
-                VStack {
-                    Spacer()
-                    DuoHomeControls(
-                        onQueue: { isDuoQueuePresented = true },
-                        onSettings: { activeTab = .settings }
-                    )
-                    .padding(.bottom, 12)
-                }
-                .frame(width: duoRailWidth)
-                .frame(maxWidth: .infinity, alignment: .trailing)
-                .zIndex(8)
-            }
-
             if isInitialLibraryLoadingVisible {
                 InitialLibraryLoadingOverlay()
                     .transition(.opacity.combined(with: .scale(scale: 0.98)))
@@ -387,6 +374,23 @@ struct ContentView: View {
             if frame == nil { dismissedAutomaticFold = false }
             updateIdleTimerState()
         }
+        .toolbar {
+            if usesDuoLayout && !showsAutomaticFold && !isPlayerCardVisible && activeTab == .home {
+                ToolbarItemGroup(placement: .bottomBar) {
+                    Spacer()
+                    Button { isDuoQueuePresented = true } label: {
+                        Label("播放队列", systemImage: "music.note.list")
+                    }
+                    .accessibilityIdentifier("duo-queue")
+                    Button { activeTab = .settings } label: {
+                        Label("我的音乐与设置", systemImage: "gearshape")
+                    }
+                    .accessibilityIdentifier("duo-settings")
+                }
+            }
+        }
+        .toolbarColorScheme(.dark, for: .bottomBar)
+        .toolbarBackground(.hidden, for: .navigationBar)
         .coordinateSpace(name: "contentRoot")
         .sheet(isPresented: $isDuoQueuePresented) {
             DuoQueueSheet(
@@ -504,6 +508,8 @@ struct ContentView: View {
                 isPlayerPillHiddenForExpansion = false
             }
         }
+    }
+
     }
 
     private func updateIdleTimerState() {
@@ -13363,50 +13369,6 @@ private struct HomeFlipSongSquare: View {
     ContentView()
 }
 
-
-// Custom content controls only. Camera, clock and connectivity remain system-owned.
-private struct DuoHomeControls: View {
-    let onQueue: () -> Void
-    let onSettings: () -> Void
-    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
-
-    var body: some View {
-        VStack(spacing: 4) {
-            Button(action: onQueue) {
-                Image(systemName: "music.note.list")
-                    .frame(width: 44, height: 44)
-            }
-            .accessibilityLabel("播放队列")
-            .accessibilityIdentifier("duo-queue")
-            Button(action: onSettings) {
-                Image(systemName: "gearshape")
-                    .frame(width: 44, height: 44)
-            }
-            .accessibilityLabel("我的音乐与设置")
-            .accessibilityIdentifier("duo-settings")
-        }
-        .font(.system(size: 21, weight: .semibold))
-        .foregroundStyle(.white)
-        .buttonStyle(.plain)
-        .padding(.vertical, 6)
-        .padding(.horizontal, 3)
-        .background {
-            Capsule()
-                .fill(.ultraThinMaterial)
-                .overlay {
-                    Capsule().fill(LinearGradient(
-                        colors: [Color(red: 0.61, green: 0.17, blue: 0.36).opacity(reduceTransparency ? 1 : 0.82),
-                                 Color(red: 0.34, green: 0.06, blue: 0.20).opacity(reduceTransparency ? 1 : 0.86)],
-                        startPoint: .topLeading, endPoint: .bottomTrailing))
-                }
-                .overlay {
-                    Capsule().strokeBorder(LinearGradient(
-                        colors: [.pink.opacity(0.8), .white.opacity(0.18), .pink.opacity(0.5)],
-                        startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 0.8)
-                }
-        }
-    }
-}
 
 private struct DuoQueueSheet: View {
     let songs: [DemoSong]

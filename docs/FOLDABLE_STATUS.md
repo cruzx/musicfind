@@ -18,4 +18,4 @@ Xcode 27.1 / iOS 27.1 iPhone Duo 模拟器：编译通过，8 项布局测试通
 
 截图 `duo-validation/book.png`、`tabletop.png` 使用本地测试封面，不是实际音乐库。正式入口启动初期的空队列提示已检查，随后成功加载远程歌曲目录（见 book-production.png）。真实音频连续播放仍未验收。
 
-当前依然复用原有自绘队列/设置胶囊，并未替换成系统原生侧边工具栏。该分支未合并主分支。
+外屏队列/设置已迁入 NavigationStack 的原生 bottomBar，由 Duo 系统放置在右侧工具栏底部。已删除自绘胶囊及 60pt 预留空白。重新编译安装通过，并人工点击验证队列弹层和设置页可打开。截图见 duo-validation/outer-native-toolbar.png。该分支未合并主分支。
