@@ -26,6 +26,7 @@ final class FlexPlayerUITests: XCTestCase {
 
     @MainActor
     func testQueueSelectionPauseScrollAndExit() {
+        XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
         app.launchArguments = ["--flex-preview"]
         app.launch()
@@ -33,7 +34,7 @@ final class FlexPlayerUITests: XCTestCase {
         XCTAssertTrue(first.waitForExistence(timeout: 15))
         XCTAssertEqual(first.value as? String, "正在播放")
         first.tap()
-        XCTAssertEqual(first.value as? String, "已暂停")
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "已暂停"), object: first)], timeout: 3), .completed)
         let second = app.buttons["flex-song-91001"]
         second.tap()
         XCTAssertEqual(second.value as? String, "正在播放")

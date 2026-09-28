@@ -3,6 +3,39 @@ import SwiftUI
 @testable import musicfind
 
 final class FlexPlayerLayoutTests: XCTestCase {
+    func testBookLayoutExcludesVerticalHinge() {
+        let layout = DuoPaneLayout(size: CGSize(width: 900, height: 680), division: CGRect(x: 440, y: 0, width: 24, height: 680))
+        XCTAssertTrue(layout.isBook)
+        XCTAssertEqual(layout.player.maxX, 440)
+        XCTAssertEqual(layout.queue.minX, 464)
+        XCTAssertEqual(layout.queue.maxX, 900)
+        XCTAssertFalse(layout.player.intersects(layout.queue))
+    }
+
+    func testTabletopLayoutExcludesHorizontalHinge() {
+        let layout = DuoPaneLayout(size: CGSize(width: 680, height: 900), division: CGRect(x: 0, y: 430, width: 680, height: 32))
+        XCTAssertFalse(layout.isBook)
+        XCTAssertEqual(layout.player.maxY, 430)
+        XCTAssertEqual(layout.queue.minY, 462)
+        XCTAssertEqual(layout.queue.maxY, 900)
+    }
+
+    func testInvalidAndEdgeRegionsDoNotActivateFold() {
+        let size = CGSize(width: 680, height: 900)
+        for frame in [CGRect.zero, CGRect(x: 0, y: 900, width: 680, height: 20), CGRect(x: 50, y: 50, width: 20, height: 20), CGRect(x: CGFloat.nan, y: 0, width: 20, height: 900)] {
+            XCTAssertNil(DuoPaneLayout.validDivision(frame, in: size))
+        }
+    }
+
+    func testQueueViewportContainsFiveAndHalfSquareCovers() {
+        for width: CGFloat in [320, 680, 900] {
+            let metrics = DuoQueueMetrics(width: width)
+            XCTAssertEqual(metrics.side * 5.5 + 8 * 5, width, accuracy: 0.001)
+            XCTAssertEqual(metrics.leadingOffset(row: 1), -metrics.stride / 2)
+            XCTAssertEqual(metrics.leadingOffset(row: 2), 0)
+        }
+    }
+
     @MainActor
     func testRenderCompactAndSquareLayouts() async throws {
         for size in [CGSize(width: 390, height: 780), CGSize(width: 800, height: 900)] {

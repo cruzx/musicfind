@@ -23,6 +23,8 @@ struct ContentView: View {
     @State private var isDuoQueuePresented = false
     @State private var activeTab: AppTab = .home
     @State private var isFlexPlayerPresented = false
+    @State private var dismissedAutomaticFold = false
+    @State private var hasActiveFold = false
     @State private var nowPlaying = DemoSong.library[0]
     @StateObject private var musicConnector = MusicConnectionManager()
     @State private var isPlayerCardVisible = false
@@ -116,6 +118,8 @@ struct ContentView: View {
 
     var body: some View {
         GeometryReader { proxy in
+            let division = DuoGeometry.division(in: proxy)
+            let showsAutomaticFold = division != nil && !dismissedAutomaticFold && activeTab != .settings
             let isLandscape = proxy.size.width > proxy.size.height
             let usesDuoLayout = duoOuterLayoutEnabled && !isLandscape
             let duoRailWidth: CGFloat = usesDuoLayout ? 60 : 0
@@ -355,6 +359,34 @@ struct ContentView: View {
 
             }
         }
+        .accessibilityHidden(showsAutomaticFold)
+        .allowsHitTesting(!showsAutomaticFold)
+        .overlay {
+            if showsAutomaticFold {
+                FlexPlayerView(
+                    songs: playerPlaybackSongs.filter { $0.isPlayable && !$0.isPlaceholder },
+                    nowPlaying: playerDisplaySong,
+                    isPlaying: musicConnector.isPlaying,
+                    isPlaybackLoading: musicConnector.isPlaybackTransitioning,
+                    onClose: { dismissedAutomaticFold = true },
+                    onTogglePlayback: {
+                        Task { await musicConnector.togglePlayback(for: playerDisplaySong, in: playerPlaybackSongs) }
+                    },
+                    onSongChange: { song in
+                        musicConnector.queuePlaybackPreservingOrder(for: song, in: playerPlaybackSongs)
+                    }
+                )
+                .zIndex(30)
+            }
+
+        }
+        .onChange(of: dismissedAutomaticFold) { _, _ in updateIdleTimerState() }
+        .onChange(of: division, initial: true) { _, frame in
+            hasActiveFold = frame != nil
+            if frame != nil { duoOuterLayoutEnabled = true }
+            if frame == nil { dismissedAutomaticFold = false }
+            updateIdleTimerState()
+        }
         .coordinateSpace(name: "contentRoot")
         .sheet(isPresented: $isDuoQueuePresented) {
             DuoQueueSheet(
@@ -475,7 +507,7 @@ struct ContentView: View {
     }
 
     private func updateIdleTimerState() {
-        UIApplication.shared.isIdleTimerDisabled = (isPlayerCardVisible || isFlexPlayerPresented) && scenePhase == .active
+        UIApplication.shared.isIdleTimerDisabled = (isPlayerCardVisible || isFlexPlayerPresented || (hasActiveFold && !dismissedAutomaticFold)) && scenePhase == .active
     }
 
     private func playHomeSong(_ song: DemoSong) {
@@ -1513,7 +1545,7 @@ struct ContentView: View {
     }
 
     private var isHomeSurfaceVisible: Bool {
-        scenePhase == .active && activeTab != .settings && !isPlayerCardVisible && !isFlexPlayerPresented
+        scenePhase == .active && activeTab != .settings && !isPlayerCardVisible && !isFlexPlayerPresented && !(hasActiveFold && !dismissedAutomaticFold)
     }
 
     private func topOffset(for column: Int) -> CGFloat {
@@ -6376,8 +6408,7 @@ private struct MusicParticleSpec {
     let hasGlow: Bool
 }
 
-/// Manual tabletop presentation. A future SDK adapter can supply the active horizontal
-/// division region; screen orientation alone must never be treated as a hinge signal.
+/// Uses the system's active division region; ordinary orientation is never a hinge signal.
 private struct FlexPlayerView: View {
     let songs: [DemoSong]
     let nowPlaying: DemoSong
@@ -6399,108 +6430,124 @@ private struct FlexPlayerView: View {
 
     var body: some View {
         GeometryReader { proxy in
-            let layout = FlexPlayerLayout(size: proxy.size, divisionFrame: divisionFrame)
-            VStack(spacing: 0) {
-                ZStack(alignment: .topTrailing) {
-                    FluidPlayerOverlay(
-                        songs: songs.isEmpty ? [nowPlaying] : songs,
-                        nowPlaying: nowPlaying,
-                        isPlaying: isPlaying,
-                        isContentVisible: scenePhase == .active,
-                        isLandscape: true,
-                        onClose: onClose,
-                        onSwipeDismiss: onClose,
-                        onTogglePlayback: onTogglePlayback,
-                        onSongChange: onSongChange
-                    )
-                    .accessibilityIdentifier("flex-player-upper")
-
-                    Button(action: onClose) {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(.white)
-                            .frame(width: 44, height: 44)
-                            .background(.ultraThinMaterial, in: Circle())
-                    }
-                    .buttonStyle(.plain)
-                    .padding(10)
-                    .accessibilityLabel("退出悬停模式")
-                    .accessibilityIdentifier("close-flex-player")
-                }
-                .frame(height: layout.playerHeight)
-                .clipped()
-
+            let layout = DuoPaneLayout(size: proxy.size, division: divisionFrame ?? DuoGeometry.division(in: proxy))
+            ZStack(alignment: .topLeading) {
                 Color.black
-                    .frame(height: layout.dividerHeight)
-                    .accessibilityHidden(true)
-
-                ZStack(alignment: .bottom) {
-                    if songs.isEmpty {
-                        ContentUnavailableView("暂无播放队列", systemImage: "music.note.list", description: Text("返回首页，连接音乐并选择歌曲"))
-                            .foregroundStyle(.white)
-                    } else {
-                        ScrollViewReader { scrollProxy in
-                            ScrollView(showsIndicators: false) {
-                                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 5), spacing: 8) {
-                                    ForEach(songs) { song in
-                                        Button {
-                                            if song.id == nowPlaying.id {
-                                                onTogglePlayback()
-                                            } else {
-                                                onSongChange(song)
-                                            }
-                                        } label: {
-                                            SongSquare(song: song, isPlaying: song.id == nowPlaying.id, isMotionPaused: scenePhase != .active)
-                                                .aspectRatio(1, contentMode: .fit)
-                                                .overlay {
-                                                    if song.id == nowPlaying.id {
-                                                        RoundedRectangle(cornerRadius: 8)
-                                                            .strokeBorder(.white.opacity(0.70), lineWidth: 1.5)
-                                                    }
-                                                }
-                                        }
-                                        .buttonStyle(.plain)
-                                        .id(song.id)
-                                        .accessibilityLabel("\(song.title)，\(song.artist)")
-                                        .accessibilityValue(song.id == nowPlaying.id ? (isPlaying ? "正在播放" : "已暂停") : "待播放")
-                                        .accessibilityIdentifier("flex-song-\(song.id)")
-                                    }
-                                }
-                                .padding(.horizontal, 8)
-                                .padding(.top, 8)
-                                // Last row can scroll fully above the floating player.
-                                .padding(.bottom, 85)
-                            }
-                            .accessibilityIdentifier("flex-player-queue")
-                            .onAppear { scrollProxy.scrollTo(nowPlaying.id, anchor: .top) }
-                        }
-
-                        BottomNavigationBar(
-                            nowPlaying: nowPlaying,
-                            isPlaying: isPlaying,
-                            isPlaybackLoading: isPlaybackLoading,
-                            nextSong: nil,
-                            namespace: namespace,
-                            isPlayerCardVisible: false,
-                            isDropTargeted: false,
-                            playerPillFrame: $pillFrame,
-                            onPlayerTap: onTogglePlayback,
-                            onTogglePlayback: onTogglePlayback,
-                            onPrevious: { step(-1) },
-                            onNext: { step(1) },
-                            onMoodSeek: { step($0 < 0 ? -1 : 1) }
-                        )
-                        .padding(.bottom, 12)
-                    }
-                }
-                .frame(height: layout.queueHeight)
-                .clipped()
-                .background(Color(red: 0, green: 0.027, blue: 0.098))
+                player(isBook: layout.isBook)
+                    .frame(width: layout.player.width, height: layout.player.height)
+                    .clipped()
+                    .offset(x: layout.player.minX, y: layout.player.minY)
+                queue(size: layout.queue.size, isBook: layout.isBook)
+                    .frame(width: layout.queue.width, height: layout.queue.height)
+                    .clipped()
+                    .offset(x: layout.queue.minX, y: layout.queue.minY)
             }
+
         }
         .background(.black)
         .preferredColorScheme(.dark)
         .coordinateSpace(name: "contentRoot")
+    }
+
+    private func player(isBook: Bool) -> some View {
+        ZStack(alignment: .topTrailing) {
+            FluidPlayerOverlay(
+                songs: songs.isEmpty ? [nowPlaying] : songs, nowPlaying: nowPlaying,
+                isPlaying: isPlaying, isContentVisible: scenePhase == .active,
+                isLandscape: !isBook, onClose: onClose, onSwipeDismiss: onClose,
+                onTogglePlayback: onTogglePlayback, onSongChange: onSongChange
+            )
+            .accessibilityIdentifier("flex-player-upper")
+            if !isBook {
+                Button(action: onClose) {
+                    Image(systemName: "xmark").font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(.white).frame(width: 44, height: 44)
+                        .background(.ultraThinMaterial, in: Circle())
+                }
+                .buttonStyle(.plain).padding(10)
+                .accessibilityLabel("退出悬停模式").accessibilityIdentifier("close-flex-player")
+            }
+        }
+    }
+
+    private func tile(_ song: DemoSong, side: CGFloat) -> some View {
+        Button {
+            if song.id == nowPlaying.id { onTogglePlayback() } else { onSongChange(song) }
+        } label: {
+            SongSquare(song: song, isPlaying: song.id == nowPlaying.id, isMotionPaused: scenePhase != .active)
+                .frame(width: side, height: side).clipped()
+                .overlay {
+                    if song.id == nowPlaying.id {
+                        RoundedRectangle(cornerRadius: 8).strokeBorder(.white.opacity(0.7), lineWidth: 1.5)
+                    }
+                }
+        }
+        .buttonStyle(.plain).id(song.id)
+        .accessibilityLabel("\(song.title)，\(song.artist)")
+        .accessibilityValue(song.id == nowPlaying.id ? (isPlaying ? "正在播放" : "已暂停") : "待播放")
+        .accessibilityIdentifier("flex-song-\(song.id)")
+    }
+
+    private func queue(size: CGSize, isBook: Bool) -> some View {
+        ZStack(alignment: .bottom) {
+            if songs.isEmpty {
+                ContentUnavailableView("暂无播放队列", systemImage: "music.note.list", description: Text("返回首页，连接音乐并选择歌曲"))
+                    .foregroundStyle(.white)
+            } else {
+                ScrollView(showsIndicators: false) {
+                    if isBook {
+                        let side = max(1, (size.width - 5 * 8) / 4)
+                        HStack(alignment: .top, spacing: 8) {
+                            ForEach(0..<4, id: \.self) { column in
+                                LazyVStack(spacing: 8) {
+                                    ForEach(Array(songs.enumerated()).filter { $0.offset % 4 == column }, id: \.element.id) { item in
+                                        tile(item.element, side: side)
+                                    }
+                                }
+                                .padding(.top, column.isMultiple(of: 2) ? 0 : (side + 8) / 2)
+                            }
+                        }.padding(.horizontal, 8).padding(.top, 70)
+                    } else {
+                        let metrics = DuoQueueMetrics(width: size.width)
+                        LazyVStack(alignment: .leading, spacing: 8) {
+                            ForEach(0..<((songs.count + 5) / 6), id: \.self) { row in
+                                ScrollView(.horizontal, showsIndicators: false) {
+                                    HStack(spacing: 8) {
+                                        ForEach(Array(songs.dropFirst(row * 6).prefix(6))) { song in
+                                            tile(song, side: metrics.side)
+                                        }
+                                    }
+
+                                }
+                                .defaultScrollAnchor(row.isMultiple(of: 2) || songs.count - row * 6 < 6 ? .leading : .trailing)
+                                .frame(height: metrics.side)
+                            }
+                        }.padding(.top, 8)
+                    }
+                    Color.clear.frame(height: 85)
+                }
+                .accessibilityIdentifier("flex-player-queue")
+                if isBook {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(nowPlaying.title).font(.title2.bold()).lineLimit(2)
+                        Text(nowPlaying.artist).font(.subheadline).foregroundStyle(.secondary)
+                        Spacer()
+                    }
+                    .padding(12).frame(maxWidth: .infinity, alignment: .leading)
+                    .background(alignment: .top) {
+                        LinearGradient(colors: [.black, .black.opacity(0)], startPoint: .top, endPoint: .bottom).frame(height: 115)
+                    }
+                    .allowsHitTesting(false)
+                }
+                BottomNavigationBar(
+                    maximumWidth: min(260, max(140, size.width - 24)),
+                    nowPlaying: nowPlaying, isPlaying: isPlaying, isPlaybackLoading: isPlaybackLoading,
+                    nextSong: nil, namespace: namespace, isPlayerCardVisible: false, isDropTargeted: false,
+                    playerPillFrame: $pillFrame, onPlayerTap: onTogglePlayback, onTogglePlayback: onTogglePlayback,
+                    onPrevious: { step(-1) }, onNext: { step(1) }, onMoodSeek: { step($0 < 0 ? -1 : 1) }
+                ).padding(.bottom, 12)
+            }
+        }.background(Color(red: 0, green: 0.027, blue: 0.098))
     }
 }
 
