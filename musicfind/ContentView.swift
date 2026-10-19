@@ -6479,8 +6479,13 @@ private struct FlexPlayerView: View {
                     .frame(width: layout.player.width, height: layout.player.height)
                     .clipped()
                     .offset(x: layout.player.minX, y: layout.player.minY)
-                queue(size: layout.queue.size, isBook: layout.isBook)
-                    .frame(width: layout.queue.width, height: layout.queue.height)
+                let queueBottomInset = layout.isBook ? CGFloat.zero : proxy.safeAreaInsets.bottom
+                queue(
+                    size: CGSize(width: layout.queue.width, height: layout.queue.height + queueBottomInset),
+                    isBook: layout.isBook,
+                    bottomInset: queueBottomInset
+                )
+                    .frame(width: layout.queue.width, height: layout.queue.height + queueBottomInset)
                     .clipped()
                     .offset(x: layout.queue.minX, y: layout.queue.minY)
             }
@@ -6530,7 +6535,7 @@ private struct FlexPlayerView: View {
         .accessibilityIdentifier("flex-song-\(song.id)")
     }
 
-    private func queue(size: CGSize, isBook: Bool) -> some View {
+    private func queue(size: CGSize, isBook: Bool, bottomInset: CGFloat) -> some View {
         ZStack(alignment: .bottom) {
             if songs.isEmpty {
                 ContentUnavailableView("暂无播放队列", systemImage: "music.note.list", description: Text("返回首页，连接音乐并选择歌曲"))
@@ -6566,7 +6571,7 @@ private struct FlexPlayerView: View {
                             }
                         }.padding(.top, 8)
                     }
-                    Color.clear.frame(height: 85)
+                    Color.clear.frame(height: 85 + bottomInset)
                 }
                 .accessibilityIdentifier("flex-player-queue")
                 if isBook {
@@ -6587,7 +6592,7 @@ private struct FlexPlayerView: View {
                     nextSong: nil, namespace: namespace, isPlayerCardVisible: false, isDropTargeted: false,
                     playerPillFrame: $pillFrame, onPlayerTap: onTogglePlayback, onTogglePlayback: onTogglePlayback,
                     onPrevious: { step(-1) }, onNext: { step(1) }, onMoodSeek: { step($0 < 0 ? -1 : 1) }
-                ).padding(.bottom, 12)
+                ).padding(.bottom, 12 + bottomInset)
             }
         }.background(isBook ? Color(red: 0, green: 0.027, blue: 0.098) : .clear)
     }
