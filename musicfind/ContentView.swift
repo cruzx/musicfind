@@ -6442,9 +6442,12 @@ private struct FlexPlayerView: View {
                 if !layout.isBook {
                     // A sampled-color surface continues beneath the queue. Only the
                     // upper pane contains artwork, fading into that same color.
-                    nowPlaying.magicColor
+                    nowPlaying.magicColor.ignoresSafeArea()
                     SongArtworkLayer(song: nowPlaying)
-                        .frame(width: layout.player.width, height: layout.player.height)
+                        .frame(
+                            width: layout.player.width + proxy.safeAreaInsets.leading + proxy.safeAreaInsets.trailing,
+                            height: layout.player.height + proxy.safeAreaInsets.top
+                        )
                         .clipped()
                         .overlay {
                             LinearGradient(colors: [.clear, .black.opacity(0.45)], startPoint: .leading, endPoint: .trailing)
@@ -6458,7 +6461,10 @@ private struct FlexPlayerView: View {
                                 .init(color: .clear, location: 1)
                             ], startPoint: .top, endPoint: .bottom)
                         }
-                        .offset(x: layout.player.minX, y: layout.player.minY)
+                        .offset(
+                            x: layout.player.minX - proxy.safeAreaInsets.leading,
+                            y: layout.player.minY - proxy.safeAreaInsets.top
+                        )
                         .allowsHitTesting(false)
                 }
                 player(isBook: layout.isBook)
