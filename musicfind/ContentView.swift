@@ -112,6 +112,14 @@ struct ContentView: View {
         }
         return compactHomePlaybackSnapshot(startingWith: playerDisplaySong)
     }
+    // The visual wall is larger than the bounded native playback buffer.
+    // Keep queued tracks first, then append unique playable home tracks.
+    private var flexBrowseSongs: [DemoSong] {
+        uniquePlayerSongs(from: (playerPlaybackSongs + songs).filter {
+            $0.isPlayable && !$0.isPlaceholder
+        })
+    }
+
     private var stablePlayerCardSongs: [DemoSong] {
         playerCardPlaybackSongs.isEmpty ? playerPlaybackSongs : playerCardPlaybackSongs
     }
@@ -351,16 +359,16 @@ struct ContentView: View {
         .overlay {
             if showsAutomaticFold {
                 FlexPlayerView(
-                    songs: playerPlaybackSongs.filter { $0.isPlayable && !$0.isPlaceholder },
+                    songs: flexBrowseSongs,
                     nowPlaying: playerDisplaySong,
                     isPlaying: musicConnector.isPlaying,
                     isPlaybackLoading: musicConnector.isPlaybackTransitioning,
                     onClose: { dismissedAutomaticFold = true },
                     onTogglePlayback: {
-                        Task { await musicConnector.togglePlayback(for: playerDisplaySong, in: playerPlaybackSongs) }
+                        Task { await musicConnector.togglePlayback(for: playerDisplaySong, in: flexBrowseSongs) }
                     },
                     onSongChange: { song in
-                        musicConnector.queuePlaybackPreservingOrder(for: song, in: playerPlaybackSongs)
+                        musicConnector.queuePlaybackPreservingOrder(for: song, in: flexBrowseSongs)
                     }
                 )
                 .zIndex(30)
@@ -406,16 +414,16 @@ struct ContentView: View {
         }
         .fullScreenCover(isPresented: $isFlexPlayerPresented) {
             FlexPlayerView(
-                songs: playerPlaybackSongs.filter { $0.isPlayable && !$0.isPlaceholder },
+                songs: flexBrowseSongs,
                 nowPlaying: playerDisplaySong,
                 isPlaying: musicConnector.isPlaying,
                 isPlaybackLoading: musicConnector.isPlaybackTransitioning,
                 onClose: { isFlexPlayerPresented = false },
                 onTogglePlayback: {
-                    Task { await musicConnector.togglePlayback(for: playerDisplaySong, in: playerPlaybackSongs) }
+                    Task { await musicConnector.togglePlayback(for: playerDisplaySong, in: flexBrowseSongs) }
                 },
                 onSongChange: { song in
-                    musicConnector.queuePlaybackPreservingOrder(for: song, in: playerPlaybackSongs)
+                    musicConnector.queuePlaybackPreservingOrder(for: song, in: flexBrowseSongs)
                 }
             )
         }
