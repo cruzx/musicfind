@@ -6440,18 +6440,25 @@ private struct FlexPlayerView: View {
             ZStack(alignment: .topLeading) {
                 Color.black
                 if !layout.isBook {
+                    // A sampled-color surface continues beneath the queue. Only the
+                    // upper pane contains artwork, fading into that same color.
+                    nowPlaying.magicColor
                     SongArtworkLayer(song: nowPlaying)
-                        .frame(width: proxy.size.width, height: proxy.size.height)
+                        .frame(width: layout.player.width, height: layout.player.height)
                         .clipped()
                         .overlay {
-                            LinearGradient(colors: [.clear, .black.opacity(0.55)], startPoint: .leading, endPoint: .trailing)
+                            LinearGradient(colors: [.clear, .black.opacity(0.45)], startPoint: .leading, endPoint: .trailing)
                         }
-                        .overlay {
+                        .mask {
                             LinearGradient(stops: [
-                                .init(color: .clear, location: 0.4),
-                                .init(color: .black.opacity(0.25), location: 1)
+                                .init(color: .white, location: 0),
+                                .init(color: .white, location: 0.58),
+                                .init(color: .white.opacity(0.88), location: 0.72),
+                                .init(color: .white.opacity(0.42), location: 0.88),
+                                .init(color: .clear, location: 1)
                             ], startPoint: .top, endPoint: .bottom)
                         }
+                        .offset(x: layout.player.minX, y: layout.player.minY)
                         .allowsHitTesting(false)
                 }
                 player(isBook: layout.isBook)
