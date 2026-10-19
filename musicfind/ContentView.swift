@@ -6439,6 +6439,21 @@ private struct FlexPlayerView: View {
             let layout = DuoPaneLayout(size: proxy.size, division: divisionFrame ?? DuoGeometry.division(in: proxy))
             ZStack(alignment: .topLeading) {
                 Color.black
+                if !layout.isBook {
+                    SongArtworkLayer(song: nowPlaying)
+                        .frame(width: proxy.size.width, height: proxy.size.height)
+                        .clipped()
+                        .overlay {
+                            LinearGradient(colors: [.clear, .black.opacity(0.55)], startPoint: .leading, endPoint: .trailing)
+                        }
+                        .overlay {
+                            LinearGradient(stops: [
+                                .init(color: .clear, location: 0.4),
+                                .init(color: .black.opacity(0.25), location: 1)
+                            ], startPoint: .top, endPoint: .bottom)
+                        }
+                        .allowsHitTesting(false)
+                }
                 player(isBook: layout.isBook)
                     .frame(width: layout.player.width, height: layout.player.height)
                     .clipped()
@@ -6460,7 +6475,7 @@ private struct FlexPlayerView: View {
             FluidPlayerOverlay(
                 songs: songs.isEmpty ? [nowPlaying] : songs, nowPlaying: nowPlaying,
                 isPlaying: isPlaying, isContentVisible: scenePhase == .active,
-                isLandscape: !isBook, onClose: onClose, onSwipeDismiss: onClose,
+                isLandscape: !isBook, showsBackdrop: isBook, onClose: onClose, onSwipeDismiss: onClose,
                 onTogglePlayback: onTogglePlayback, onSongChange: onSongChange
             )
             .accessibilityIdentifier("flex-player-upper")
@@ -6553,7 +6568,7 @@ private struct FlexPlayerView: View {
                     onPrevious: { step(-1) }, onNext: { step(1) }, onMoodSeek: { step($0 < 0 ? -1 : 1) }
                 ).padding(.bottom, 12)
             }
-        }.background(Color(red: 0, green: 0.027, blue: 0.098))
+        }.background(isBook ? Color(red: 0, green: 0.027, blue: 0.098) : .clear)
     }
 }
 
@@ -6568,6 +6583,7 @@ private struct FluidPlayerOverlay: View {
     let isPlaying: Bool
     let isContentVisible: Bool
     let isLandscape: Bool
+    var showsBackdrop: Bool = true
     let onClose: () -> Void
     let onSwipeDismiss: () -> Void
     let onTogglePlayback: () -> Void
@@ -6600,6 +6616,7 @@ private struct FluidPlayerOverlay: View {
         GeometryReader { proxy in
             let topInset = max(proxy.safeAreaInsets.top, 8)
             ZStack {
+                if showsBackdrop {
                 FluidPlayerBackdrop(
                     song: currentSong,
                     isPlaying: isPlaying,
@@ -6630,10 +6647,13 @@ private struct FluidPlayerOverlay: View {
                         }
                 }
 
+                }
+
                 FluidPlayerPage(
                     song: currentSong,
                     isPlaying: isPlaying && visualsActive,
                     isLandscape: isLandscape,
+                    showsBackdrop: showsBackdrop,
                     motionChannel: spatialMotion.detailChannel
                 )
                 .environment(\.playerVisualsActive, visualsActive)
@@ -6645,6 +6665,7 @@ private struct FluidPlayerOverlay: View {
                         song: targetSong,
                         isPlaying: isPlaying && visualsActive,
                         isLandscape: isLandscape,
+                        showsBackdrop: showsBackdrop,
                         motionChannel: spatialMotion.detailChannel
                     )
                     .environment(\.playerVisualsActive, visualsActive)
@@ -8306,6 +8327,7 @@ private struct FluidPlayerPage: View {
     let song: DemoSong
     let isPlaying: Bool
     let isLandscape: Bool
+    var showsBackdrop: Bool = true
     let motionChannel: SpatialMotionChannel
 
     var body: some View {
@@ -8320,9 +8342,12 @@ private struct FluidPlayerPage: View {
                     let lyricsRegionCenterY = proxy.size.height * 0.51
 
                     ZStack(alignment: .leading) {
+                        if showsBackdrop {
                         LandscapeFullHeightArtwork(song: song, motionChannel: motionChannel)
                             .frame(width: proxy.size.width, height: proxy.size.height)
                             .frame(maxHeight: .infinity, alignment: .top)
+
+                        }
 
                         SyncedLyricsPairView(
                             song: song,
